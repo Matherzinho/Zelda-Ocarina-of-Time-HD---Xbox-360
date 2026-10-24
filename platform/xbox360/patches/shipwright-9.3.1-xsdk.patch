@@ -156,7 +156,7 @@ index 22adf036..740d2030 100644
  #endif
  #if defined(__APPLE__) && defined(NDEBUG)
 diff --git a/soh/soh/OTRGlobals.cpp b/soh/soh/OTRGlobals.cpp
-index 67bd1777..245d24b9 100644
+index 67bd1777..069026dc 100644
 --- a/soh/soh/OTRGlobals.cpp
 +++ b/soh/soh/OTRGlobals.cpp
 @@ -56,7 +56,7 @@
@@ -207,26 +207,7 @@ index 67bd1777..245d24b9 100644
  
  extern "C" char** cameraStrings;
  
-@@ -286,6 +299,18 @@ OTRGlobals::OTRGlobals() {
- 
-     context->InitConfiguration();
-     context->InitConsoleVariables();
-+#ifdef __XSDK__
-+    // Optional Brazilian Portuguese (oot360): ptbr.o2r, made on the player's PC from their own patched ROM by
-+    // oot360's tools/ptbr, replaces the English text and the font's accented glyphs; added after oot.o2r so its files
-+    // win. "gOot360.PtBr" (Settings > Languages) turns it off; the change takes effect at the next start.
-+    {
-+        std::string ptbrPath = Ship::Context::LocateFileAcrossAppDirs("ptbr.o2r", appShortName);
-+        if (std::filesystem::exists(ptbrPath) && CVarGetInteger("gOot360.PtBr", 1)) {
-+            context->GetResourceManager()->GetArchiveManager()->AddArchive(ptbrPath);
-+            SPDLOG_INFO("oot360: Portuguese (Brazil) text from {}", ptbrPath);
-+        }
-+    }
-+#endif
- 
-     auto controlDeck = std::make_shared<LUS::ControlDeck>(std::vector<CONTROLLERBUTTONS_T>({
-         BTN_CUSTOM_MODIFIER1,
-@@ -325,7 +350,13 @@ OTRGlobals::OTRGlobals() {
+@@ -325,7 +338,13 @@ OTRGlobals::OTRGlobals() {
          fontStandard = CreateFontWithSize(16.0f, "fonts/Montserrat-Regular.ttf");
          fontStandardLarger = CreateFontWithSize(20.0f, "fonts/Montserrat-Regular.ttf");
          fontStandardLargest = CreateFontWithSize(24.0f, "fonts/Montserrat-Regular.ttf");
@@ -240,7 +221,7 @@ index 67bd1777..245d24b9 100644
          ImGui::GetIO().FontDefault = fontStandardLarger;
      }
  
-@@ -408,6 +439,49 @@ static bool RemoveArchiveAcrossAppDirs(const std::string& fileName) {
+@@ -408,6 +427,49 @@ static bool RemoveArchiveAcrossAppDirs(const std::string& fileName) {
      return !std::filesystem::exists(Ship::Context::LocateFileAcrossAppDirs(fileName, appShortName));
  }
  
@@ -290,7 +271,7 @@ index 67bd1777..245d24b9 100644
  void OTRGlobals::RunExtract(int argc, char* argv[]) {
      bool extractDone = false;
      ExtractSteps extractStep = ES_PORT_ARCHIVE;
-@@ -821,6 +895,7 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
+@@ -821,6 +883,7 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
      Ship::WiiU::Init(appShortName);
  #endif
  }
@@ -298,6 +279,25 @@ index 67bd1777..245d24b9 100644
  
  void InitGfxDebugger() {
      auto dbg =
+@@ -846,6 +909,18 @@ void OTRGlobals::Initialize() {
+     if (std::filesystem::exists(ootPath)) {
+         context->GetResourceManager()->GetArchiveManager()->AddArchive(ootPath);
+     }
++#ifdef __XSDK__
++    // Optional Brazilian Portuguese (oot360): ptbr.o2r, made on the player's PC from their own patched ROM by
++    // oot360's tools/ptbr, replaces the English text and the font's accented glyphs; added after oot.o2r so its files
++    // win. "gOot360.PtBr" (Settings > Languages) turns it off; the change takes effect at the next start.
++    {
++        std::string ptbrPath = Ship::Context::LocateFileAcrossAppDirs("ptbr.o2r", appShortName);
++        if (std::filesystem::exists(ptbrPath) && CVarGetInteger("gOot360.PtBr", 1)) {
++            context->GetResourceManager()->GetArchiveManager()->AddArchive(ptbrPath);
++            SPDLOG_INFO("oot360: Portuguese (Brazil) text from {}", ptbrPath);
++        }
++    }
++#endif
+ 
+     std::unordered_set<uint32_t> ValidHashes = {
+         OOT_PAL_MQ,     OOT_NTSC_JP_MQ, OOT_NTSC_US_MQ, OOT_PAL_GC_MQ_DBG, OOT_NTSC_US_10,
 @@ -860,6 +935,18 @@ void OTRGlobals::Initialize() {
  #endif
      context->InitConfiguration();
