@@ -35,8 +35,13 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
 - `platform/xbox360/build.sh`: the whole build from the toolchain alone.
 - `tools/romtool`: ROM identify/diff/extract, BPS applier; `.gitignore` + pre-commit hook against game data.
 
-## In progress
-- First full compile of Ship of Harkinian for powerpc-xsdk-elf; fixing what breaks.
+## Build result (2026-10-24)
+- Ship of Harkinian 9.3.1 compiles and links for powerpc-xsdk-elf: `soh.xex` (98 MB image: .text 36.8 MB,
+  .bss 54 MB of which gGfxPools 48 MB). xsdk's xenia_scan lists 355 instructions Xenia skips (libstdc++ demangler,
+  newlib dtoa): Xenia results are unreliable there, the console decides.
+- Excluded on the console: ROM extractor/torch, networking (SDL_net, CrowdControl, Sail, Anchor), ImGui's shell
+  functions. Added: Ogg/Vorbis/Opus/opusfile for custom audio.
+- Test 1 delivered to the user (E:\oot360-dev\teste1). **Not yet run on a console.**
 
 ## Not done yet / known gaps
 - Link and first XEX; first console run (needs the user: console, `oot.o2r`/`soh.o2r` from SoH 9.3.1).

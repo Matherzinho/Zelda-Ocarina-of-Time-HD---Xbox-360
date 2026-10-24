@@ -15,10 +15,10 @@ index 08cc791..6291497 100644
      include(cmake/ios-toolchain-populate.cmake)
 diff --git a/cmake/dependencies/xsdk.cmake b/cmake/dependencies/xsdk.cmake
 new file mode 100644
-index 0000000..3e022e7
+index 0000000..d2d9e46
 --- /dev/null
 +++ b/cmake/dependencies/xsdk.cmake
-@@ -0,0 +1,15 @@
+@@ -0,0 +1,17 @@
 +# Xbox 360 (xenosworks xsdk). SDL2 is sdl2-compat over SDL-xenon (SDL3 with renamed symbols), both static,
 +# from the oot360 sysroot (platform/xbox360/deps). No OpenGL: rendering goes through the Xenos backend.
 +if(NOT TARGET SDL2::SDL2)
@@ -34,6 +34,8 @@ index 0000000..3e022e7
 +get_target_property(_imgui_sources ImGui SOURCES)
 +list(FILTER _imgui_sources EXCLUDE REGEX "imgui_impl_opengl3")
 +set_property(TARGET ImGui PROPERTY SOURCES ${_imgui_sources})
++# No shell to open links in (ImGui's default calls fork/execvp).
++target_compile_definitions(ImGui PRIVATE IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS)
 diff --git a/include/fast/Fast3dWindow.h b/include/fast/Fast3dWindow.h
 index 7c16ca1..5ff7e5b 100644
 --- a/include/fast/Fast3dWindow.h
