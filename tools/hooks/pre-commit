@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Blocks commits that would add game data (ROMs, archives extracted from a ROM, patches, saves)
+# or any large binary. Enabled with: git config core.hooksPath tools/hooks
+set -euo pipefail
+
+blocked_ext='\.(z64|n64|v64|rom|bin|iso|o2r|otr|bps|ips|xdelta|ups|aps|sav|srm|eep|fla|mpk|xex|elf|exe|dll)$'
+max_bytes=$((2 * 1024 * 1024))
+fail=0
+
+while IFS= read -r -d '' f; do
+	if [[ "$f" =~ $blocked_ext ]] || [[ "$f" == localdata/* ]] || [[ "$f" == extracted/* ]]; then
+		echo "pre-commit: blocked file type or folder: $f" >&2
+		fail=1
+		continue
+	fi
+	size=$(git cat-file -s ":$f" 2>/dev/null || echo 0)
+	if (( size > max_bytes )); then
+		echo "pre-commit: file over 2 MB: $f ($size bytes)" >&2
+		fail=1
+		continue
+	fi
+	# N64 ROM headers in any byte order, Yaz0 data and zip archives (.o2r) by content.
+	# head closes the pipe early; with pipefail that would end the hook, so the pipe may fail here.
+	magic=$( (git cat-file -p ":$f" 2>/dev/null || true) | head -c 4 | od -An -tx1 | tr -d ' \n' || true)
+	case "$magic" in
+		80371240|37804012|40123780|59617a30|504b0304)
+			echo "pre-commit: file looks like game data (magic $magic): $f" >&2
+			fail=1
+			;;
+	esac
+done < <(git diff --cached --name-only --diff-filter=ACMR -z)
+
+if (( fail )); then
+	echo "pre-commit: commit refused. Game data must stay in localdata/ (ignored)." >&2
+	exit 1
+fi

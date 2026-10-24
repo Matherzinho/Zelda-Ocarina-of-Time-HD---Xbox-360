@@ -1,0 +1,2304 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 08cc791..6291497 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -72,6 +72,10 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
+     include(cmake/dependencies/windows.cmake)
+ endif()
+ 
++if (XSDK)
++    include(cmake/dependencies/xsdk.cmake)
++endif()
++
+ # === Platform Specific Configuration ===
+ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+     include(cmake/ios-toolchain-populate.cmake)
+diff --git a/cmake/dependencies/xsdk.cmake b/cmake/dependencies/xsdk.cmake
+new file mode 100644
+index 0000000..3e022e7
+--- /dev/null
++++ b/cmake/dependencies/xsdk.cmake
+@@ -0,0 +1,15 @@
++# Xbox 360 (xenosworks xsdk). SDL2 is sdl2-compat over SDL-xenon (SDL3 with renamed symbols), both static,
++# from the oot360 sysroot (platform/xbox360/deps). No OpenGL: rendering goes through the Xenos backend.
++if(NOT TARGET SDL2::SDL2)
++    add_library(SDL2::SDL2 INTERFACE IMPORTED GLOBAL)
++    set_target_properties(SDL2::SDL2 PROPERTIES
++        INTERFACE_INCLUDE_DIRECTORIES "${OOT360_SYSROOT}/include/SDL2;${OOT360_SYSROOT}/include"
++        INTERFACE_LINK_LIBRARIES "${OOT360_SYSROOT}/lib/libSDL2.a;${OOT360_SYSROOT}/lib/libSDL3X.a")
++endif()
++set(SDL2_INCLUDE_DIRS "${OOT360_SYSROOT}/include/SDL2")
++target_link_libraries(ImGui PUBLIC SDL2::SDL2)
++
++# ImGui renders through the Xenos backend; drop the OpenGL3 renderer backend common.cmake added.
++get_target_property(_imgui_sources ImGui SOURCES)
++list(FILTER _imgui_sources EXCLUDE REGEX "imgui_impl_opengl3")
++set_property(TARGET ImGui PROPERTY SOURCES ${_imgui_sources})
+diff --git a/include/fast/Fast3dWindow.h b/include/fast/Fast3dWindow.h
+index 7c16ca1..5ff7e5b 100644
+--- a/include/fast/Fast3dWindow.h
++++ b/include/fast/Fast3dWindow.h
+@@ -23,6 +23,7 @@ enum WindowBackend {
+     FAST3D_DXGI_DX11 = 1,
+     FAST3D_SDL_OPENGL = 2,
+     FAST3D_SDL_METAL = 3,
++    FAST3D_XENOS = 4,
+ };
+ 
+ class Fast3dWindow : public Ship::Window {
+diff --git a/include/fast/backends/gfx_xenos.h b/include/fast/backends/gfx_xenos.h
+new file mode 100644
+index 0000000..e3d63c2
+--- /dev/null
++++ b/include/fast/backends/gfx_xenos.h
+@@ -0,0 +1,303 @@
++#ifdef ENABLE_XENOS
++#pragma once
++
++// Fast3D on the Xbox 360's Xenos GPU through xenosworks' xsdk (homebrew, no Microsoft SDK). See
++// src/fast/backends/gfx_xenos.cpp for how framebuffers map onto eDRAM, and xenos/fast3d.frag for the combiner.
++
++#include "gfx_rendering_api.h"
++#include "gfx_window_manager_api.h"
++#include "../interpreter.h"
++
++#include <cstdint>
++#include <map>
++#include <unordered_map>
++#include <vector>
++
++extern "C" {
++#include <xsdk/gpu.h>
++#include <xsdk/present.h>
++#include <xsdk/shader.h>
++#include <xsdk/texture.h>
++}
++
++struct ImDrawData;
++
++namespace Fast {
++
++// Pixel shader variants, one bit each (gfx_xenos_shaders, built from xenos/fast3d.frag).
++enum XenosPixelVariant : uint32_t {
++    XENOS_PS_TP0 = 1,
++    XENOS_PS_TP1 = 2,
++    XENOS_PS_CYC2 = 4,
++    XENOS_PS_KILL = 8,
++    XENOS_PS_VARIANTS = 16,
++};
++
++// The pixel shader's push constants, as fast3d.frag's Push block lays them out.
++struct XenosCycleWeights {
++    float ab[4][4];
++    float c[4][4];
++    float d[4][4];
++};
++
++struct XenosCombinerConstants {
++    XenosCycleWeights color0, alpha0, color1, alpha1;
++    float opts0[4];
++    float opts1[4];
++    float clamps[4];
++    float sizes[4];
++    float misc[4];
++};
++
++struct ShaderProgram {
++    uint64_t shaderId0;
++    uint64_t shaderId1;
++    uint8_t numInputs;
++    bool usedTextures[2];
++    uint8_t numFloats;
++    bool twoCycle;
++    bool mayKill;
++    bool primDepth;
++    XsdkShader* vertex;
++    // Everything in XenosCombinerConstants that the combiner alone decides; per draw the backend adds sizes,
++    // filtering and the frame's noise.
++    XenosCombinerConstants constants;
++};
++
++// A 2D texture in GPU memory, its sampler with it, as Fast3D sets filtering and wrapping per texture.
++struct XenosTexture {
++    XsdkTexture texture = {};
++    volatile uint32_t* memory = nullptr;
++    uint32_t bytes = 0;
++    uint16_t width = 0;
++    uint16_t height = 0;
++    bool linear = false;
++    bool threePoint = false;
++    uint32_t addressU = 0;
++    uint32_t addressV = 0;
++    XsdkSamplerState sampler = {};
++    bool samplerDirty = true;
++};
++
++struct XenosFramebuffer {
++    uint32_t width = 0;
++    uint32_t height = 0;
++    bool hasDepth = false;
++    // The colour as last resolved out of eDRAM, sampled by copies, by the GUI and when the framebuffer is drawn to
++    // again after another one used eDRAM.
++    uint32_t textureId = 0;
++    bool textureValid = false;
++};
++
++class GfxWindowBackendXenos final : public GfxWindowBackend {
++  public:
++    GfxWindowBackendXenos() = default;
++    ~GfxWindowBackendXenos() override = default;
++
++    void Init(const char* gameName, const char* apiName, bool startFullScreen, uint32_t width, uint32_t height,
++              int32_t posX, int32_t posY) override;
++    void Close() override;
++    void SetKeyboardCallbacks(bool (*onKeyDown)(int scancode), bool (*onKeyUp)(int scancode),
++                              void (*onAllKeysUp)()) override;
++    void SetMouseCallbacks(bool (*onMouseButtonDown)(int btn), bool (*onMouseButtonUp)(int btn)) override;
++    void SetFullscreenChangedCallback(void (*onFullscreenChanged)(bool is_now_fullscreen)) override;
++    void SetFullscreen(bool fullscreen) override;
++    void GetActiveWindowRefreshRate(uint32_t* refreshRate) override;
++    void SetCursorVisibility(bool visibility) override;
++    void SetMousePos(int32_t posX, int32_t posY) override;
++    void GetMousePos(int32_t* x, int32_t* y) override;
++    void GetMouseDelta(int32_t* x, int32_t* y) override;
++    void GetMouseWheel(float* x, float* y) override;
++    bool GetMouseState(uint32_t btn) override;
++    void SetMouseCapture(bool capture) override;
++    bool IsMouseCaptured() override;
++    void GetDimensions(uint32_t* width, uint32_t* height, int32_t* posX, int32_t* posY) override;
++    void SetDimensions(uint32_t width, uint32_t height, int32_t posX, int32_t posY) override;
++    Ship::WindowRect GetPrimaryMonitorRect() override;
++    void HandleEvents() override;
++    bool IsFrameReady() override;
++    void SwapBuffersBegin() override;
++    void SwapBuffersEnd() override;
++    double GetTime() override;
++    int GetTargetFps() override;
++    void SetTargetFps(int fps) override;
++    void SetMaxFrameLatency(int latency) override;
++    const char* GetKeyName(int scancode) override;
++    bool CanDisableVsync() override;
++    bool IsRunning() override;
++    void Destroy() override;
++    bool IsFullscreen() override;
++
++    uint32_t DisplayWidth() const {
++        return mWidth;
++    }
++    uint32_t DisplayHeight() const {
++        return mHeight;
++    }
++
++  private:
++    uint32_t mWidth = 1280;
++    uint32_t mHeight = 720;
++    bool mOpen = false;
++    uint32_t mQuitHeldFrames = 0;
++};
++
++class GfxRenderingAPIXenos final : public GfxRenderingAPI {
++  public:
++    explicit GfxRenderingAPIXenos(GfxWindowBackendXenos* window);
++    ~GfxRenderingAPIXenos() override;
++
++    const char* GetName() override;
++    int GetMaxTextureSize() override;
++    GfxClipParameters GetClipParameters() override;
++    void UnloadShader(ShaderProgram* oldPrg) override;
++    void LoadShader(ShaderProgram* newPrg) override;
++    void ClearShaderCache() override;
++    ShaderProgram* CreateAndLoadNewShader(uint64_t shaderId0, uint64_t shaderId1) override;
++    ShaderProgram* LookupShader(uint64_t shaderId0, uint64_t shaderId1) override;
++    void ShaderGetInfo(ShaderProgram* prg, uint8_t* numInputs, bool usedTextures[2]) override;
++    uint32_t NewTexture() override;
++    void SelectTexture(int tile, uint32_t textureId) override;
++    void UploadTexture(const uint8_t* rgba32Buf, uint32_t width, uint32_t height) override;
++    void SetSamplerParameters(int sampler, bool linear_filter, uint32_t cms, uint32_t cmt) override;
++    void SetDepthTestAndMask(bool depth_test, bool z_upd) override;
++    void SetZmodeDecal(bool decal) override;
++    void SetViewport(int x, int y, int width, int height) override;
++    void SetScissor(int x, int y, int width, int height) override;
++    void SetUseAlpha(bool useAlpha) override;
++    void DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris) override;
++    void Init() override;
++    void OnResize() override;
++    void StartFrame() override;
++    void EndFrame() override;
++    void FinishRender() override;
++    int CreateFramebuffer() override;
++    void UpdateFramebufferParameters(int fb_id, uint32_t width, uint32_t height, uint32_t msaa_level,
++                                     bool opengl_invertY, bool render_target, bool has_depth_buffer,
++                                     bool can_extract_depth) override;
++    void StartDrawToFramebuffer(int fbId, float noiseScale) override;
++    void CopyFramebuffer(int fbDstId, int fbSrcId, int srcX0, int srcY0, int srcX1, int srcY1, int dstX0, int dstY0,
++                         int dstX1, int dstY1) override;
++    void ClearFramebuffer(bool color, bool depth) override;
++    void ReadFramebufferToCPU(int fbId, uint32_t width, uint32_t height, uint16_t* rgba16Buf) override;
++    void ResolveMSAAColorBuffer(int fbIdTarget, int fbIdSrc) override;
++    std::unordered_map<std::pair<float, float>, uint16_t, hash_pair_ff>
++    GetPixelDepth(int fb_id, const std::set<std::pair<float, float>>& coordinates) override;
++    void* GetFramebufferTextureId(int fbId) override;
++    void SelectTextureFb(int fbId) override;
++    void DeleteTexture(uint32_t texId) override;
++    void SetTextureFilter(FilteringMode mode) override;
++    FilteringMode GetTextureFilter() override;
++    void SetSrgbMode() override;
++    ImTextureID GetTextureById(int id) override;
++    void SetCurrentPrimDepth(float depth) override;
++
++    // Dear ImGui on Xenos (Fast3dGui calls these for WindowBackend::FAST3D_XENOS).
++    void ImGuiInit();
++    void ImGuiShutdown();
++    void ImGuiRenderDrawData(ImDrawData* data);
++
++  private:
++    struct GpuBlock {
++        volatile uint32_t* memory;
++        uint32_t bytes;
++        uint64_t frame;
++    };
++
++    // GPU memory: textures come from pools carved in 4 KB steps, since xsdk_gpu_alloc hands out 64 KB pages;
++    // what the GPU may still read waits for its frame's fence before it is reused.
++    volatile uint32_t* GpuAlloc(uint32_t bytes);
++    void GpuFreeLater(volatile uint32_t* memory, uint32_t bytes);
++    void GpuReclaim();
++
++    XenosTexture& Texture(uint32_t id);
++    void ApplySampler(XenosTexture& t);
++    bool CreateTextureStorage(XenosTexture& t, uint32_t format, uint32_t width, uint32_t height, bool resolveTarget);
++
++    // eDRAM: one framebuffer at a time; its colour goes to its texture when another takes eDRAM.
++    void BindTarget(int fbId);
++    void ResolveBound(bool keepBound);
++    void RestoreIfNeeded();
++    void ResetDrawState();
++    void DrawTexturedRect(const XenosTexture& tex, float u0, float v0, float u1, float v1, float x0, float y0,
++                          float x1, float y1);
++
++    volatile uint32_t* VertexSpace(uint32_t bytes, uint32_t* address);
++
++    XsdkShader* VertexShaderFor(const CCFeatures& cc, uint8_t* numFloats);
++    void BuildCombinerConstants(const CCFeatures& cc, XenosCombinerConstants& out);
++
++    GfxWindowBackendXenos* mWindow;
++
++    std::map<std::pair<uint64_t, uint64_t>, ShaderProgram> mShaderPool;
++    std::map<uint64_t, XsdkShader*> mVertexShaders;
++    XsdkShader mPixelShaders[XENOS_PS_VARIANTS] = {};
++    XsdkShader mBlitVertex = {};
++    XsdkShader mBlitPixel = {};
++    XsdkShader mClearVertex = {};
++    XsdkShader mClearPixel = {};
++    XsdkShader mImGuiVertex = {};
++    XsdkShader mImGuiPixel = {};
++    ShaderProgram* mCurrentShader = nullptr;
++
++    std::vector<XenosTexture> mTextures;
++    std::vector<uint32_t> mFreeTextureIds;
++    uint32_t mCurrentTextureIds[SHADER_MAX_TEXTURES] = {};
++    int mCurrentTile = 0;
++    FilteringMode mFilterMode = FILTER_THREE_POINT;
++
++    std::vector<XenosFramebuffer> mFramebuffers;
++    int mCurrentFb = 0;   // the framebuffer Fast3D draws to
++    int mBoundFb = -1;    // the one in eDRAM, its target set
++    bool mBoundDirty = false;
++    bool mNeedsRestore = false;
++    uint32_t mTargetHeight = 720;
++
++    // GPU state as last set, so draws only set what changed; a target change or resolve forgets it.
++    bool mStateValid = false;
++    bool mUseAlpha = false;
++    int8_t mLastDepthKey = -1;
++    int8_t mLastBlend = -1;
++    int8_t mLastDecal = -1;
++    const XsdkShader* mLastVertex = nullptr;
++    const XsdkShader* mLastPixel = nullptr;
++    XsdkDepthStencilState mDepthStates[8] = {};
++    XsdkBlendState mBlendOff = {};
++    XsdkBlendState mBlendAlpha = {};
++    XsdkRasterState mRasterNormal = {};
++    XsdkRasterState mRasterDecal = {};
++    XsdkSamplerState mBlitSampler = {};
++    int mViewport[4] = { 0, 0, 1280, 720 };
++    int mScissor[4] = { 0, 0, 1280, 720 };
++    bool mViewportDirty = true;
++    bool mScissorDirty = true;
++
++    // Vertices: a ring per frame in flight, each frame's part freed by its fence.
++    static constexpr uint32_t kFramesInFlight = 2;
++    static constexpr uint32_t kVertexRingBytes = 6u << 20;
++    volatile uint32_t* mVertexRing[kFramesInFlight] = {};
++    uint32_t mVertexOffset = 0;
++    uint32_t mRingIndex = 0;
++    uint32_t mFrameFence[kFramesInFlight] = {};
++    uint64_t mFrame = 0;
++    uint32_t mOverflowDraws = 0;
++
++    struct Pool {
++        volatile uint32_t* base;
++        uint32_t bytes;
++        std::map<uint32_t, uint32_t> freeRanges; // offset -> size
++    };
++    std::vector<Pool> mPools;
++    std::vector<GpuBlock> mPendingFrees;
++    std::map<uint64_t, uint32_t> mFenceOfFrame;
++
++    float mNoiseScale = 1.0f;
++    uint32_t mFrameCount = 0;
++    uint32_t mFontTexture = 0;
++    uint32_t mWhiteTexture = 0;
++    uint64_t mDrawsThisFrame = 0;
++};
++
++} // namespace Fast
++
++#endif
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 45989b6..48e8ef3 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -201,6 +201,16 @@ if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
+             XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO"
+         )
+     endif()
++elseif(XSDK)
++    target_compile_definitions(libultraship PRIVATE
++        ENABLE_XENOS
++        $<$<CONFIG:Debug>:_DEBUG>
++        $<$<NOT:$<CONFIG:Debug>>:NDEBUG>
++        SPDLOG_ACTIVE_LEVEL=${SPDLOG_MIN_CUTOFF}
++        SPDLOG_NO_THREAD_ID
++        SPDLOG_NO_TLS
++        STBI_NO_THREAD_LOCALS
++    )
+ else()
+     target_compile_definitions(libultraship PRIVATE
+         ENABLE_OPENGL
+diff --git a/src/fast/CMakeLists.txt b/src/fast/CMakeLists.txt
+index 66bf70d..7eaffde 100644
+--- a/src/fast/CMakeLists.txt
++++ b/src/fast/CMakeLists.txt
+@@ -39,5 +39,58 @@ if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
+     list(FILTER Source_Files__Graphic EXCLUDE REGEX "graphic/Fast3D/backends/gfx_opengl*")
+ endif()
+ 
++if (XSDK)
++    # Xbox 360: no OpenGL/SDL video; the Xenos backend (gfx_xenos*) replaces them.
++    list(FILTER Source_Files__Graphic EXCLUDE REGEX "backends/gfx_(opengl|sdl2|dxgi|direct3d|metal)")
++endif()
++
++if (XSDK)
++    # The Xenos backend's shaders: fast3d.frag in 16 variants, one define per bit of XenosPixelVariant
++    # (gfx_xenos.h), compiled with xsdk's GLSL toolchain into libultraship_shaders.h.
++    set(XENOS_SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/backends/xenos)
++    file(READ ${XENOS_SHADER_DIR}/fast3d.frag XENOS_FAST3D_FRAG)
++    string(REGEX REPLACE "^#version 450\n" "" XENOS_FAST3D_BODY "${XENOS_FAST3D_FRAG}")
++    set(XENOS_SHADERS ${XENOS_SHADER_DIR}/fast3d.vert ${XENOS_SHADER_DIR}/ui.vert ${XENOS_SHADER_DIR}/ui.frag)
++    foreach(variant RANGE 0 15)
++        set(defines "")
++        foreach(bit_name IN ITEMS "1;TP0" "2;TP1" "4;CYC2" "8;KILL")
++            list(GET bit_name 0 bit)
++            list(GET bit_name 1 name)
++            math(EXPR has "${variant} & ${bit}")
++            if(has)
++                string(APPEND defines "#define ${name} 1\n")
++            endif()
++        endforeach()
++        set(out ${CMAKE_CURRENT_BINARY_DIR}/xenos/fast3d_v${variant}.frag)
++        set(content "#version 450\n${defines}${XENOS_FAST3D_BODY}")
++        if(EXISTS ${out})
++            file(READ ${out} old)
++        else()
++            set(old "")
++        endif()
++        if(NOT old STREQUAL content)
++            file(WRITE ${out} "${content}")
++        endif()
++        list(APPEND XENOS_SHADERS ${out})
++    endforeach()
++    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${XENOS_SHADER_DIR}/fast3d.frag)
++    # As xsdk_add_shaders does, but through a target of its own: libultraship is defined in the parent directory,
++    # which wouldn't see a custom command's output from here.
++    set(XENOS_SHADER_HEADER ${CMAKE_CURRENT_BINARY_DIR}/libultraship_shaders.h)
++    set(XENOS_GLSLANG "")
++    if(EXISTS "${XSDK_GLSLANG}")
++        set(XENOS_GLSLANG --glslang "${XSDK_GLSLANG}")
++    endif()
++    add_custom_command(OUTPUT ${XENOS_SHADER_HEADER}
++        COMMAND python3 "${XSDK_ROOT}/tools/build_shaders.py" ${XENOS_GLSLANG} --output ${XENOS_SHADER_HEADER}
++                ${XENOS_SHADERS}
++        DEPENDS ${XENOS_SHADERS} "${XSDK_ROOT}/tools/build_shaders.py"
++        COMMENT "Compiling the Xenos shaders"
++        VERBATIM)
++    add_custom_target(libultraship_xenos_shaders DEPENDS ${XENOS_SHADER_HEADER})
++    add_dependencies(libultraship libultraship_xenos_shaders)
++    target_include_directories(libultraship PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
++endif()
++
+ source_group("graphic" FILES ${Source_Files__Graphic})
+ target_sources(libultraship PRIVATE ${Source_Files__Graphic})
+diff --git a/src/fast/Fast3dGui.cpp b/src/fast/Fast3dGui.cpp
+index 237a502..a18aeff 100644
+--- a/src/fast/Fast3dGui.cpp
++++ b/src/fast/Fast3dGui.cpp
+@@ -29,6 +29,56 @@
+ #include <imgui_impl_sdl2.h>
+ #endif
+ 
++#ifdef ENABLE_XENOS
++#include <imgui_impl_sdl2.h>
++#include <chrono>
++#include "fast/backends/gfx_xenos.h"
++extern "C" {
++#include <xsdk/kernel.h>
++}
++
++namespace {
++// Dear ImGui's gamepad navigation from controller 1, read straight from XAM (the SDL2 platform backend needs a
++// window, which the console doesn't have).
++void XenosImGuiGamepad(ImGuiIO& io) {
++    INPUT_STATE st = {};
++    if (XamInputGetState(0, 0, &st) != ERROR_SUCCESS) {
++        io.BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
++        return;
++    }
++    io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
++    const uint16_t b = st.gamepad.buttons;
++    struct Map {
++        ImGuiKey key;
++        uint16_t mask;
++    } const maps[] = {
++        { ImGuiKey_GamepadStart, INPUT_GAMEPAD_START },     { ImGuiKey_GamepadBack, INPUT_GAMEPAD_BACK },
++        { ImGuiKey_GamepadFaceDown, INPUT_GAMEPAD_A },      { ImGuiKey_GamepadFaceRight, INPUT_GAMEPAD_B },
++        { ImGuiKey_GamepadFaceLeft, INPUT_GAMEPAD_X },      { ImGuiKey_GamepadFaceUp, INPUT_GAMEPAD_Y },
++        { ImGuiKey_GamepadDpadLeft, INPUT_GAMEPAD_DPAD_LEFT }, { ImGuiKey_GamepadDpadRight, INPUT_GAMEPAD_DPAD_RIGHT },
++        { ImGuiKey_GamepadDpadUp, INPUT_GAMEPAD_DPAD_UP },  { ImGuiKey_GamepadDpadDown, INPUT_GAMEPAD_DPAD_DOWN },
++        { ImGuiKey_GamepadL1, INPUT_GAMEPAD_LEFT_SHOULDER }, { ImGuiKey_GamepadR1, INPUT_GAMEPAD_RIGHT_SHOULDER },
++        { ImGuiKey_GamepadL3, INPUT_GAMEPAD_LEFT_THUMB },   { ImGuiKey_GamepadR3, INPUT_GAMEPAD_RIGHT_THUMB },
++    };
++    for (const Map& m : maps) {
++        io.AddKeyEvent(m.key, (b & m.mask) != 0);
++    }
++    io.AddKeyAnalogEvent(ImGuiKey_GamepadL2, st.gamepad.left_trigger > 64, st.gamepad.left_trigger / 255.0f);
++    io.AddKeyAnalogEvent(ImGuiKey_GamepadR2, st.gamepad.right_trigger > 64, st.gamepad.right_trigger / 255.0f);
++    auto axis = [&](ImGuiKey neg, ImGuiKey pos, int16_t v, bool invert) {
++        const float f = (invert ? -v : v) / 32767.0f;
++        const float dead = 0.25f;
++        io.AddKeyAnalogEvent(neg, f < -dead, f < -dead ? (-f - dead) / (1 - dead) : 0.0f);
++        io.AddKeyAnalogEvent(pos, f > dead, f > dead ? (f - dead) / (1 - dead) : 0.0f);
++    };
++    axis(ImGuiKey_GamepadLStickLeft, ImGuiKey_GamepadLStickRight, st.gamepad.thumb_lx, false);
++    axis(ImGuiKey_GamepadLStickUp, ImGuiKey_GamepadLStickDown, st.gamepad.thumb_ly, true);
++    axis(ImGuiKey_GamepadRStickLeft, ImGuiKey_GamepadRStickRight, st.gamepad.thumb_rx, false);
++    axis(ImGuiKey_GamepadRStickUp, ImGuiKey_GamepadRStickDown, st.gamepad.thumb_ry, true);
++}
++} // namespace
++#endif
++
+ #if defined(ENABLE_DX11) || defined(ENABLE_DX12)
+ #include <imgui_impl_dx11.h>
+ #include <imgui_impl_win32.h>
+@@ -107,6 +157,15 @@ void Fast3dGui::ImGuiWMInit() {
+         case WindowBackend::FAST3D_DXGI_DX11:
+             ImGui_ImplWin32_Init(mImpl.Dx11.Window);
+             break;
++#endif
++#ifdef ENABLE_XENOS
++        case WindowBackend::FAST3D_XENOS: {
++            ImGuiIO& io = ImGui::GetIO();
++            io.BackendPlatformName = "xenos";
++            io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
++            io.DisplaySize = ImVec2(1280, 720);
++            break;
++        }
+ #endif
+         default:
+             break;
+@@ -167,6 +226,11 @@ void Fast3dGui::ImGuiBackendInit() {
+             ImGui_ImplDX11_Init(static_cast<ID3D11Device*>(mImpl.Dx11.Device),
+                                 static_cast<ID3D11DeviceContext*>(mImpl.Dx11.DeviceContext));
+             break;
++#endif
++#ifdef ENABLE_XENOS
++        case WindowBackend::FAST3D_XENOS:
++            static_cast<GfxRenderingAPIXenos*>(mInterpreter.lock()->GetCurrentRenderingAPI())->ImGuiInit();
++            break;
+ #endif
+         default:
+             break;
+@@ -222,6 +286,25 @@ void Fast3dGui::ImGuiBackendNewFrame() {
+ }
+ 
+ void Fast3dGui::ImGuiWMNewFrame() {
++#ifdef ENABLE_XENOS
++    if (mImpl.Backend == WindowBackend::FAST3D_XENOS) {
++        ImGuiIO& io = ImGui::GetIO();
++        uint32_t w = 1280, h = 720;
++        int32_t px, py;
++        auto interp = mInterpreter.lock();
++        if (interp) {
++            interp->mWapi->GetDimensions(&w, &h, &px, &py);
++        }
++        io.DisplaySize = ImVec2((float)w, (float)h);
++        static auto last = std::chrono::steady_clock::now();
++        const auto now = std::chrono::steady_clock::now();
++        const float dt = std::chrono::duration<float>(now - last).count();
++        last = now;
++        io.DeltaTime = dt > 0.0f ? dt : 1.0f / 60.0f;
++        XenosImGuiGamepad(io);
++        return;
++    }
++#endif
+     switch (mImpl.Backend) {
+         case WindowBackend::FAST3D_SDL_OPENGL:
+         case WindowBackend::FAST3D_SDL_METAL:
+@@ -248,6 +331,12 @@ void Fast3dGui::RefreshImGuiGamepads() {
+ }
+ 
+ void Fast3dGui::ImGuiRenderDrawData(ImDrawData* data) {
++#ifdef ENABLE_XENOS
++    if (mImpl.Backend == WindowBackend::FAST3D_XENOS) {
++        static_cast<GfxRenderingAPIXenos*>(mInterpreter.lock()->GetCurrentRenderingAPI())->ImGuiRenderDrawData(data);
++        return;
++    }
++#endif
+     switch (mImpl.Backend) {
+ #ifdef ENABLE_OPENGL
+         case WindowBackend::FAST3D_SDL_OPENGL:
+diff --git a/src/fast/Fast3dWindow.cpp b/src/fast/Fast3dWindow.cpp
+index 2b77a5f..a975689 100644
+--- a/src/fast/Fast3dWindow.cpp
++++ b/src/fast/Fast3dWindow.cpp
+@@ -12,6 +12,7 @@
+ #include "fast/backends/gfx_direct3d_common.h"
+ #include "fast/backends/gfx_direct3d11.h"
+ #include "fast/backends/gfx_window_manager_api.h"
++#include "fast/backends/gfx_xenos.h"
+ 
+ #include "fast/Fast3dGui.h"
+ 
+@@ -36,7 +37,11 @@ Fast3dWindow::Fast3dWindow(std::shared_ptr<Ship::Gui> gui, std::shared_ptr<FastM
+         AddAvailableWindowBackend(WindowBackend::FAST3D_SDL_METAL);
+     }
+ #endif
++#ifdef ENABLE_XENOS
++    AddAvailableWindowBackend(WindowBackend::FAST3D_XENOS);
++#else
+     AddAvailableWindowBackend(WindowBackend::FAST3D_SDL_OPENGL);
++#endif
+ }
+ 
+ Fast3dWindow::Fast3dWindow(std::shared_ptr<Ship::Gui> gui)
+@@ -154,6 +159,14 @@ void Fast3dWindow::InitWindowManager() {
+             mRenderingApi = new GfxRenderingAPIMetal();
+             mWindowManagerApi = new GfxWindowBackendSDL2();
+             break;
++#endif
++#ifdef ENABLE_XENOS
++        case WindowBackend::FAST3D_XENOS: {
++            auto* window = new GfxWindowBackendXenos();
++            mWindowManagerApi = window;
++            mRenderingApi = new GfxRenderingAPIXenos(window);
++            break;
++        }
+ #endif
+         default:
+             SPDLOG_ERROR("Could not load the correct rendering backend");
+@@ -401,6 +414,8 @@ std::string Fast3dWindow::GetWindowBackendName() {
+             return "OpenGL";
+         case WindowBackend::FAST3D_SDL_METAL:
+             return "Metal";
++        case WindowBackend::FAST3D_XENOS:
++            return "Xenos";
+         default:
+             return "";
+     }
+diff --git a/src/fast/backends/gfx_xenos.cpp b/src/fast/backends/gfx_xenos.cpp
+new file mode 100644
+index 0000000..ada1385
+--- /dev/null
++++ b/src/fast/backends/gfx_xenos.cpp
+@@ -0,0 +1,1428 @@
++#ifdef ENABLE_XENOS
++// Fast3D on the Xbox 360's Xenos GPU through xenosworks' xsdk.
++//
++// Framebuffers. Xenos draws only into eDRAM (10 MB), then resolves eDRAM into a texture or a front buffer. So one
++// Fast3D framebuffer at a time lives in eDRAM: the one bound. Switching to another resolves the bound one's colour
++// into its texture; drawing into a framebuffer again after that first draws its texture back ("restore"), unless the
++// first thing done is a colour clear. Depth survives only while the framebuffer stays bound. Framebuffer 0 is the
++// screen: EndFrame resolves it into the front buffer xsdk_present_begin gives.
++//
++// Shaders. One vertex shader for every combiner, its fetches patched per vertex layout (the interpreter packs each
++// vertex as its combiner needs); one pixel shader template in 16 variants (three-point filtering of each texture, the
++// second cycle, discard), the combiner itself in push constants (xenos/fast3d.frag).
++//
++// Coordinates follow the Direct3D 11 backend: depth 0 to 1, y up in clip space, viewports and scissors given from
++// the bottom-left and flipped here.
++
++#include "fast/backends/gfx_xenos.h"
++
++#include <algorithm>
++#include <chrono>
++#include <cmath>
++#include <cstring>
++
++#include <SDL2/SDL.h>
++#include <imgui.h>
++#include <spdlog/spdlog.h>
++
++extern "C" {
++#include <xsdk/kernel.h>
++#include <xsdk/log.h>
++}
++
++#include "libultraship_shaders.h" // fast3d.vert, fast3d_v0..15.frag, ui.vert, ui.frag (xsdk_add_shaders)
++
++#include "fast/interpreter.h"
++#include "libultraship/libultra/gbi.h"
++#include "ship/Context.h"
++#include "fast/Fast3dGui.h"
++#include "fast/Fast3dWindow.h"
++
++namespace Fast {
++
++namespace {
++
++constexpr uint32_t kBeginTimeoutMs = 5000;
++constexpr uint32_t kFenceTimeoutMs = 2000;
++constexpr uint32_t kPoolBytes = 16u << 20;
++constexpr uint32_t kTextureAlign = 4096;
++
++const XsdkBuiltShader* const kPixelVariants[XENOS_PS_VARIANTS] = {
++    &fast3d_v0_frag,  &fast3d_v1_frag,  &fast3d_v2_frag,  &fast3d_v3_frag,  &fast3d_v4_frag,  &fast3d_v5_frag,
++    &fast3d_v6_frag,  &fast3d_v7_frag,  &fast3d_v8_frag,  &fast3d_v9_frag,  &fast3d_v10_frag, &fast3d_v11_frag,
++    &fast3d_v12_frag, &fast3d_v13_frag, &fast3d_v14_frag, &fast3d_v15_frag,
++};
++
++// Every variant takes its push constants and samplers in the same registers (fast3d.frag declares them alike).
++static_assert(FAST3D_V0_FRAG_PUSH == 0 && FAST3D_V15_FRAG_PUSH == 0, "pixel push constants move between variants");
++static_assert(FAST3D_V0_FRAG_PUSH_REGISTERS * 16 == sizeof(XenosCombinerConstants), "Push block layout changed");
++static_assert(FAST3D_V15_FRAG_PUSH_REGISTERS == FAST3D_V0_FRAG_PUSH_REGISTERS, "variants' Push blocks differ");
++
++// The vertex the 2D shaders read (ui.vert): position, colour as 4 bytes, texture coordinates. ImDrawVert's layout.
++struct UiVertex {
++    float x, y;
++    float u, v;
++    uint32_t color; // IM_COL32: red in the low byte
++};
++static_assert(sizeof(UiVertex) == 20, "UiVertex must match ImDrawVert");
++
++const XsdkVertexElement kUiLayout[] = {
++    { .usage = XSDK_USAGE_POSITION, .usage_index = 0, .format = XSDK_VERTEX_FLOAT2, .stream = 0, .offset_bytes = 0 },
++    { .usage = XSDK_USAGE_TEXCOORD, .usage_index = 0, .format = XSDK_VERTEX_FLOAT2, .stream = 0, .offset_bytes = 8 },
++    { .usage = XSDK_USAGE_COLOR, .usage_index = 0, .format = XSDK_VERTEX_UBYTE4N, .stream = 0, .offset_bytes = 16 },
++};
++
++void WriteWords(volatile uint32_t* dst, const void* src, uint32_t bytes) {
++    const uint8_t* s = static_cast<const uint8_t*>(src);
++    const uint32_t words = bytes / 4;
++    for (uint32_t i = 0; i < words; i++) {
++        uint32_t w;
++        memcpy(&w, s + i * 4, 4);
++        dst[i] = w;
++    }
++}
++
++uint32_t AddressMode(uint32_t cm) {
++    switch (cm) {
++        case G_TX_NOMIRROR | G_TX_CLAMP:
++            return XSDK_ADDRESS_CLAMP;
++        case G_TX_MIRROR | G_TX_WRAP:
++            return XSDK_ADDRESS_MIRROR;
++        case G_TX_MIRROR | G_TX_CLAMP:
++            return XSDK_ADDRESS_MIRROR_ONCE;
++        case G_TX_NOMIRROR | G_TX_WRAP:
++        default:
++            return XSDK_ADDRESS_WRAP;
++    }
++}
++
++// Where a combiner source's weight sits in XenosCycleWeights (fast3d.frag's WSUM); -1 for the constants.
++struct WeightSlot {
++    int vec;
++    int lane;
++    float constant;
++};
++
++WeightSlot SlotOf(int item) {
++    switch (item) {
++        case SHADER_INPUT_1:
++        case SHADER_INPUT_2:
++        case SHADER_INPUT_3:
++        case SHADER_INPUT_4:
++            return { 0, item - SHADER_INPUT_1, 0.0f };
++        case SHADER_INPUT_5:
++        case SHADER_INPUT_6:
++        case SHADER_INPUT_7:
++            return { 1, item - SHADER_INPUT_5, 0.0f };
++        case SHADER_TEXEL0:
++            return { 1, 3, 0.0f };
++        case SHADER_TEXEL0A:
++            return { 2, 0, 0.0f };
++        case SHADER_TEXEL1:
++            return { 2, 1, 0.0f };
++        case SHADER_TEXEL1A:
++            return { 2, 2, 0.0f };
++        case SHADER_COMBINED:
++            return { 2, 3, 0.0f };
++        case SHADER_NOISE:
++            return { 3, 0, 0.0f };
++        case SHADER_1:
++            return { -1, 0, 1.0f };
++        case SHADER_0:
++        default:
++            return { -1, 0, 0.0f };
++    }
++}
++
++void AddWeight(float w[4][4], int item, float sign) {
++    const WeightSlot s = SlotOf(item);
++    if (s.vec < 0) {
++        w[3][1] += sign * s.constant;
++    } else {
++        w[s.vec][s.lane] += sign;
++    }
++}
++
++// (a - b) * c + d for one channel set of one cycle: items[0..3] are a, b, c, d.
++void CycleWeights(const int items[4], XenosCycleWeights& out) {
++    memset(&out, 0, sizeof out);
++    AddWeight(out.ab, items[0], 1.0f);
++    AddWeight(out.ab, items[1], -1.0f);
++    AddWeight(out.c, items[2], 1.0f);
++    AddWeight(out.d, items[3], 1.0f);
++}
++
++uint64_t LayoutKey(const CCFeatures& cc) {
++    uint64_t k = cc.numInputs & 7;
++    k |= (uint64_t)cc.opt_alpha << 3;
++    k |= (uint64_t)cc.usedTextures[0] << 4;
++    k |= (uint64_t)cc.usedTextures[1] << 5;
++    k |= (uint64_t)cc.clamp[0][0] << 6;
++    k |= (uint64_t)cc.clamp[0][1] << 7;
++    k |= (uint64_t)cc.clamp[1][0] << 8;
++    k |= (uint64_t)cc.clamp[1][1] << 9;
++    k |= (uint64_t)cc.opt_fog << 10;
++    k |= (uint64_t)cc.opt_grayscale << 11;
++    return k;
++}
++
++} // namespace
++
++// ---------------------------------------------------------------------------------------------------------------
++// Window: the display, the controller's quit combination, time.
++
++void GfxWindowBackendXenos::Init(const char* gameName, const char* apiName, bool startFullScreen, uint32_t width,
++                                 uint32_t height, int32_t posX, int32_t posY) {
++    NTSTATUS s = xsdk_gpu_open();
++    if (!NT_SUCCESS(s)) {
++        xsdk_log_write("xenos: xsdk_gpu_open failed: 0x%08X", (unsigned)s);
++        mIsRunning = false;
++        return;
++    }
++    s = xsdk_present_open(XSDK_DISPLAY_720P, 2, 1, &mWidth, &mHeight);
++    if (!NT_SUCCESS(s)) {
++        xsdk_log_write("xenos: xsdk_present_open failed: 0x%08X", (unsigned)s);
++        mIsRunning = false;
++        return;
++    }
++    mOpen = true;
++    mFullScreen = true;
++    xsdk_log_write("xenos: display %ux%u", (unsigned)mWidth, (unsigned)mHeight);
++
++    Fast::GuiWindowInitData windowImpl = {};
++    windowImpl.Backend = WindowBackend::FAST3D_XENOS;
++    std::dynamic_pointer_cast<Fast::Fast3dGui>(Ship::Context::GetRawInstance()->GetWindow()->GetGui())->Init(windowImpl);
++}
++
++void GfxWindowBackendXenos::Close() {
++    mIsRunning = false;
++}
++
++void GfxWindowBackendXenos::SetKeyboardCallbacks(bool (*onKeyDown)(int), bool (*onKeyUp)(int), void (*onAllKeysUp)()) {
++    mOnKeyDown = onKeyDown;
++    mOnKeyUp = onKeyUp;
++}
++
++void GfxWindowBackendXenos::SetMouseCallbacks(bool (*onMouseButtonDown)(int), bool (*onMouseButtonUp)(int)) {
++    mOnMouseButtonDown = onMouseButtonDown;
++    mOnMouseButtonUp = onMouseButtonUp;
++}
++
++void GfxWindowBackendXenos::SetFullscreenChangedCallback(void (*onFullscreenChanged)(bool)) {
++    mOnFullscreenChanged = onFullscreenChanged;
++}
++
++void GfxWindowBackendXenos::SetFullscreen(bool fullscreen) {
++}
++
++void GfxWindowBackendXenos::GetActiveWindowRefreshRate(uint32_t* refreshRate) {
++    *refreshRate = 60;
++}
++
++void GfxWindowBackendXenos::SetCursorVisibility(bool visibility) {
++}
++
++void GfxWindowBackendXenos::SetMousePos(int32_t posX, int32_t posY) {
++}
++
++void GfxWindowBackendXenos::GetMousePos(int32_t* x, int32_t* y) {
++    *x = 0;
++    *y = 0;
++}
++
++void GfxWindowBackendXenos::GetMouseDelta(int32_t* x, int32_t* y) {
++    *x = 0;
++    *y = 0;
++}
++
++void GfxWindowBackendXenos::GetMouseWheel(float* x, float* y) {
++    *x = 0;
++    *y = 0;
++}
++
++bool GfxWindowBackendXenos::GetMouseState(uint32_t btn) {
++    return false;
++}
++
++void GfxWindowBackendXenos::SetMouseCapture(bool capture) {
++}
++
++bool GfxWindowBackendXenos::IsMouseCaptured() {
++    return false;
++}
++
++void GfxWindowBackendXenos::GetDimensions(uint32_t* width, uint32_t* height, int32_t* posX, int32_t* posY) {
++    *width = mWidth;
++    *height = mHeight;
++    *posX = 0;
++    *posY = 0;
++}
++
++void GfxWindowBackendXenos::SetDimensions(uint32_t width, uint32_t height, int32_t posX, int32_t posY) {
++}
++
++Ship::WindowRect GfxWindowBackendXenos::GetPrimaryMonitorRect() {
++    return { 0, 0, (int32_t)mWidth, (int32_t)mHeight };
++}
++
++void GfxWindowBackendXenos::HandleEvents() {
++    // SDL (SDL-xenon through sdl2-compat) keeps the controllers; pumping its events notices hot-plugging.
++    SDL_Event event;
++    while (SDL_PollEvent(&event)) {
++        if (event.type == SDL_QUIT) {
++            mIsRunning = false;
++        }
++    }
++    // Back and Start held for a second leaves the title, as the zelda3 port does.
++    INPUT_STATE input = {};
++    if (XamInputGetState(0, 0, &input) == ERROR_SUCCESS &&
++        (input.gamepad.buttons & (INPUT_GAMEPAD_BACK | INPUT_GAMEPAD_START)) ==
++            (INPUT_GAMEPAD_BACK | INPUT_GAMEPAD_START)) {
++        if (++mQuitHeldFrames >= 60) {
++            mIsRunning = false;
++        }
++    } else {
++        mQuitHeldFrames = 0;
++    }
++}
++
++bool GfxWindowBackendXenos::IsFrameReady() {
++    return true;
++}
++
++void GfxWindowBackendXenos::SwapBuffersBegin() {
++}
++
++void GfxWindowBackendXenos::SwapBuffersEnd() {
++    // Presenting is the rendering API's EndFrame; xsdk_present_begin waits for a free front buffer, which paces the
++    // frames at the display's 60 Hz.
++}
++
++double GfxWindowBackendXenos::GetTime() {
++    using namespace std::chrono;
++    return duration_cast<duration<double>>(steady_clock::now().time_since_epoch()).count();
++}
++
++int GfxWindowBackendXenos::GetTargetFps() {
++    return mTargetFps;
++}
++
++void GfxWindowBackendXenos::SetTargetFps(int fps) {
++    mTargetFps = fps;
++}
++
++void GfxWindowBackendXenos::SetMaxFrameLatency(int latency) {
++}
++
++const char* GfxWindowBackendXenos::GetKeyName(int scancode) {
++    return "";
++}
++
++bool GfxWindowBackendXenos::CanDisableVsync() {
++    return false;
++}
++
++bool GfxWindowBackendXenos::IsRunning() {
++    return mIsRunning;
++}
++
++void GfxWindowBackendXenos::Destroy() {
++    if (mOpen) {
++        xsdk_present_close();
++        xsdk_gpu_close();
++        mOpen = false;
++    }
++}
++
++bool GfxWindowBackendXenos::IsFullscreen() {
++    return true;
++}
++
++// ---------------------------------------------------------------------------------------------------------------
++// Rendering API
++
++GfxRenderingAPIXenos::GfxRenderingAPIXenos(GfxWindowBackendXenos* window) : mWindow(window) {
++}
++
++GfxRenderingAPIXenos::~GfxRenderingAPIXenos() = default;
++
++const char* GfxRenderingAPIXenos::GetName() {
++    return "Xenos";
++}
++
++int GfxRenderingAPIXenos::GetMaxTextureSize() {
++    return 8192;
++}
++
++GfxClipParameters GfxRenderingAPIXenos::GetClipParameters() {
++    return { true, false };
++}
++
++volatile uint32_t* GfxRenderingAPIXenos::GpuAlloc(uint32_t bytes) {
++    bytes = (bytes + kTextureAlign - 1) & ~(kTextureAlign - 1);
++    for (int attempt = 0; attempt < 2; attempt++) {
++        for (Pool& pool : mPools) {
++            for (auto it = pool.freeRanges.begin(); it != pool.freeRanges.end(); ++it) {
++                if (it->second >= bytes) {
++                    const uint32_t offset = it->first;
++                    const uint32_t size = it->second;
++                    pool.freeRanges.erase(it);
++                    if (size > bytes) {
++                        pool.freeRanges[offset + bytes] = size - bytes;
++                    }
++                    return pool.base + offset / 4;
++                }
++            }
++        }
++        // None free: a pool more (a big allocation gets one of its own size).
++        const uint32_t poolBytes = std::max(kPoolBytes, bytes);
++        volatile uint32_t* base = xsdk_gpu_alloc(poolBytes);
++        if (!base) {
++            // Out of GPU memory: wait for the GPU and take back what it was still using, then try once more.
++            for (uint32_t f : mFrameFence) {
++                if (f) {
++                    xsdk_gpu_wait(f, kFenceTimeoutMs);
++                }
++            }
++            mFenceOfFrame.clear();
++            for (const GpuBlock& b : mPendingFrees) {
++                GpuFreeLater(b.memory, b.bytes);
++            }
++            GpuReclaim();
++            continue;
++        }
++        Pool pool = { base, poolBytes, {} };
++        pool.freeRanges[0] = poolBytes;
++        mPools.push_back(std::move(pool));
++        xsdk_log_write("xenos: GPU pool %u: %u KB", (unsigned)mPools.size(), (unsigned)(poolBytes >> 10));
++    }
++    xsdk_log_write("xenos: out of GPU memory for %u bytes", (unsigned)bytes);
++    return nullptr;
++}
++
++void GfxRenderingAPIXenos::GpuFreeLater(volatile uint32_t* memory, uint32_t bytes) {
++    if (!memory) {
++        return;
++    }
++    bytes = (bytes + kTextureAlign - 1) & ~(kTextureAlign - 1);
++    mPendingFrees.push_back({ memory, bytes, mFrame });
++}
++
++void GfxRenderingAPIXenos::GpuReclaim() {
++    // A block freed in frame f is free once frame f's fence has landed (or frame f had no fence yet).
++    auto done = [&](uint64_t frame) {
++        auto it = mFenceOfFrame.find(frame);
++        if (it == mFenceOfFrame.end()) {
++            return frame < mFrame; // no draw used it in a frame not yet fenced
++        }
++        return xsdk_gpu_fence_done(it->second);
++    };
++    auto keep = std::remove_if(mPendingFrees.begin(), mPendingFrees.end(), [&](const GpuBlock& b) {
++        if (!done(b.frame)) {
++            return false;
++        }
++        for (Pool& pool : mPools) {
++            const uintptr_t start = (uintptr_t)pool.base;
++            const uintptr_t at = (uintptr_t)b.memory;
++            if (at >= start && at < start + pool.bytes) {
++                uint32_t offset = (uint32_t)(at - start);
++                uint32_t size = b.bytes;
++                // Merge with the neighbours.
++                auto next = pool.freeRanges.lower_bound(offset);
++                if (next != pool.freeRanges.end() && offset + size == next->first) {
++                    size += next->second;
++                    next = pool.freeRanges.erase(next);
++                }
++                if (next != pool.freeRanges.begin()) {
++                    auto prev = std::prev(next);
++                    if (prev->first + prev->second == offset) {
++                        prev->second += size;
++                        return true;
++                    }
++                }
++                pool.freeRanges[offset] = size;
++                return true;
++            }
++        }
++        return true;
++    });
++    mPendingFrees.erase(keep, mPendingFrees.end());
++    for (auto it = mFenceOfFrame.begin(); it != mFenceOfFrame.end();) {
++        it = (it->first + 8 < mFrame) ? mFenceOfFrame.erase(it) : std::next(it);
++    }
++}
++
++void GfxRenderingAPIXenos::Init() {
++    NTSTATUS s = xsdk_shader_load(&mBlitVertex, ui_vert.container, ui_vert.container_bytes);
++    if (NT_SUCCESS(s)) {
++        s = xsdk_shader_set_vertex_layout(&mBlitVertex, kUiLayout, 3, (const uint32_t[]){ sizeof(UiVertex) });
++    }
++    if (NT_SUCCESS(s)) {
++        s = xsdk_shader_load(&mBlitPixel, ui_frag.container, ui_frag.container_bytes);
++    }
++    for (uint32_t v = 0; v < XENOS_PS_VARIANTS && NT_SUCCESS(s); v++) {
++        s = xsdk_shader_load(&mPixelShaders[v], kPixelVariants[v]->container, kPixelVariants[v]->container_bytes);
++    }
++    if (!NT_SUCCESS(s)) {
++        xsdk_log_write("xenos: loading shaders failed: 0x%08X", (unsigned)s);
++    }
++
++    for (uint32_t i = 0; i < kFramesInFlight; i++) {
++        mVertexRing[i] = xsdk_gpu_alloc(kVertexRingBytes);
++        if (!mVertexRing[i]) {
++            xsdk_log_write("xenos: no GPU memory for the vertex ring");
++        }
++    }
++
++    for (int test = 0; test < 2; test++) {
++        for (int write = 0; write < 2; write++) {
++            for (int decal = 0; decal < 2; decal++) {
++                XsdkDepthStencil d = {};
++                d.depth_test = test || write;
++                d.depth_write = write;
++                d.depth_compare = test ? (decal ? XSDK_COMPARE_LESS_EQUAL : XSDK_COMPARE_LESS) : XSDK_COMPARE_ALWAYS;
++                xsdk_gpu_depth_stencil_state(&mDepthStates[test * 4 + write * 2 + decal], &d);
++            }
++        }
++    }
++    const XsdkBlend off = { XSDK_BLEND_ONE, XSDK_BLEND_ZERO, XSDK_BLEND_OP_ADD, XSDK_BLEND_ONE, XSDK_BLEND_ZERO,
++                            XSDK_BLEND_OP_ADD, XSDK_WRITE_ALL, false };
++    const XsdkBlend alpha = { XSDK_BLEND_SRC_ALPHA, XSDK_BLEND_ONE_MINUS_SRC_ALPHA, XSDK_BLEND_OP_ADD,
++                              XSDK_BLEND_SRC_ALPHA, XSDK_BLEND_ONE_MINUS_SRC_ALPHA, XSDK_BLEND_OP_ADD,
++                              XSDK_WRITE_ALL, false };
++    xsdk_gpu_blend_state(&mBlendOff, &off);
++    xsdk_gpu_blend_state(&mBlendAlpha, &alpha);
++    // libultraship's OpenGL backend: glPolygonOffset(-2, -2) for decals (its default Z-fighting mode).
++    const XsdkRaster normal = { XSDK_CULL_NONE, false, 0.0f, 0.0f, XSDK_FILL_SOLID };
++    const XsdkRaster decal = { XSDK_CULL_NONE, false, -2.0f, -2.0f, XSDK_FILL_SOLID };
++    xsdk_gpu_raster_state(&mRasterNormal, &normal);
++    xsdk_gpu_raster_state(&mRasterDecal, &decal);
++    const XsdkSampler blit = { .mag_filter = XSDK_FILTER_LINEAR,
++                               .min_filter = XSDK_FILTER_LINEAR,
++                               .mip_filter = XSDK_FILTER_POINT,
++                               .address_u = XSDK_ADDRESS_CLAMP,
++                               .address_v = XSDK_ADDRESS_CLAMP };
++    xsdk_texture_sampler_state(&mBlitSampler, &blit);
++
++    mTextures.resize(1); // id 0 is no texture
++    // A white texel: clears draw with it, and samplers the combiner doesn't read point at it.
++    mWhiteTexture = NewTexture();
++    {
++        XenosTexture& w = Texture(mWhiteTexture);
++        const uint8_t white[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
++        if (CreateTextureStorage(w, XSDK_FORMAT_R8G8B8A8, 1, 1, false)) {
++            xsdk_texture_upload(&w.texture, 0, white, 4);
++            xsdk_gpu_invalidate(w.texture.address, w.texture.size_bytes);
++        }
++        ApplySampler(w);
++    }
++    mFramebuffers.resize(1); // the screen
++    mFramebuffers[0].width = mWindow->DisplayWidth();
++    mFramebuffers[0].height = mWindow->DisplayHeight();
++    mFramebuffers[0].hasDepth = true;
++    mFramebuffers[0].textureId = NewTexture();
++    xsdk_log_write("xenos: renderer ready");
++}
++
++void GfxRenderingAPIXenos::OnResize() {
++}
++
++// ---------------------------------------------------------------------------------------------------------------
++// Shaders
++
++XsdkShader* GfxRenderingAPIXenos::VertexShaderFor(const CCFeatures& cc, uint8_t* numFloats) {
++    // The interpreter's packing (interpreter.cpp, the vertex loop) in fast3d.vert's input locations.
++    struct Input {
++        bool present;
++        uint32_t format;
++        uint32_t offset;
++    } in[16] = {};
++    const uint32_t vec4Format[5] = { 0, XSDK_VERTEX_FLOAT1, XSDK_VERTEX_FLOAT2, XSDK_VERTEX_FLOAT3,
++                                     XSDK_VERTEX_FLOAT4 };
++    uint32_t pos = 0;
++    in[0] = { true, XSDK_VERTEX_FLOAT4, 0 };
++    pos += 4;
++    for (int t = 0; t < 2; t++) {
++        if (!cc.usedTextures[t]) {
++            continue;
++        }
++        in[2 + t] = { true, XSDK_VERTEX_FLOAT2, pos * 4 };
++        pos += 2;
++        for (int j = 0; j < 2; j++) {
++            if (cc.clamp[t][j]) {
++                in[4 + t * 2 + j] = { true, XSDK_VERTEX_FLOAT1, pos * 4 };
++                pos += 1;
++            }
++        }
++    }
++    if (cc.opt_fog) {
++        in[8] = { true, XSDK_VERTEX_FLOAT4, pos * 4 };
++        pos += 4;
++    }
++    if (cc.opt_grayscale) {
++        in[9] = { true, XSDK_VERTEX_FLOAT4, pos * 4 };
++        pos += 4;
++    }
++    const uint32_t inputFloats = cc.opt_alpha ? 4 : 3;
++    for (int i = 0; i < cc.numInputs && i < 7; i++) {
++        const int location = i == 0 ? 1 : 10 + (i - 1);
++        in[location] = { true, vec4Format[inputFloats], pos * 4 };
++        pos += inputFloats;
++    }
++    *numFloats = (uint8_t)pos;
++
++    const uint64_t key = LayoutKey(cc);
++    auto found = mVertexShaders.find(key);
++    if (found != mVertexShaders.end()) {
++        return found->second;
++    }
++
++    // Inputs the combiner doesn't use read the position: the pixel shader weighs them by 0.
++    const uint32_t declared[16] = { XSDK_VERTEX_FLOAT4, XSDK_VERTEX_FLOAT4, XSDK_VERTEX_FLOAT2, XSDK_VERTEX_FLOAT2,
++                                    XSDK_VERTEX_FLOAT1, XSDK_VERTEX_FLOAT1, XSDK_VERTEX_FLOAT1, XSDK_VERTEX_FLOAT1,
++                                    XSDK_VERTEX_FLOAT4, XSDK_VERTEX_FLOAT4, XSDK_VERTEX_FLOAT4, XSDK_VERTEX_FLOAT4,
++                                    XSDK_VERTEX_FLOAT4, XSDK_VERTEX_FLOAT4, XSDK_VERTEX_FLOAT4, XSDK_VERTEX_FLOAT4 };
++    XsdkVertexElement layout[16] = {};
++    for (int l = 0; l < 16; l++) {
++        layout[l].usage = l == 0 ? XSDK_USAGE_POSITION : l == 1 ? XSDK_USAGE_COLOR : XSDK_USAGE_TEXCOORD;
++        layout[l].usage_index = l < 2 ? 0 : l - 2;
++        layout[l].format = in[l].present ? in[l].format : declared[l];
++        layout[l].stream = 0;
++        layout[l].offset_bytes = in[l].present ? in[l].offset : 0;
++    }
++    auto* shader = new XsdkShader();
++    NTSTATUS s = xsdk_shader_load(shader, fast3d_vert.container, fast3d_vert.container_bytes);
++    if (NT_SUCCESS(s)) {
++        s = xsdk_shader_set_vertex_layout(shader, layout, 16, (const uint32_t[]){ pos * 4 });
++    }
++    if (!NT_SUCCESS(s)) {
++        xsdk_log_write("xenos: vertex shader for layout %llx failed: 0x%08X", (unsigned long long)key, (unsigned)s);
++    }
++    mVertexShaders[key] = shader;
++    return shader;
++}
++
++void GfxRenderingAPIXenos::BuildCombinerConstants(const CCFeatures& cc, XenosCombinerConstants& out) {
++    memset(&out, 0, sizeof out);
++    for (int cyc = 0; cyc < 2; cyc++) {
++        XenosCycleWeights& color = cyc == 0 ? out.color0 : out.color1;
++        XenosCycleWeights& alpha = cyc == 0 ? out.alpha0 : out.alpha1;
++        int colorItems[4], alphaItems[4];
++        for (int k = 0; k < 4; k++) {
++            colorItems[k] = cc.c[cyc][0][k];
++            // Where colour and alpha share their formula, the alpha comes from the colour's sources' alphas.
++            alphaItems[k] = (cc.color_alpha_same[cyc] || !cc.opt_alpha) ? cc.c[cyc][0][k] : cc.c[cyc][1][k];
++        }
++        CycleWeights(colorItems, color);
++        CycleWeights(alphaItems, alpha);
++    }
++    out.opts0[0] = cc.opt_alpha;
++    out.opts0[1] = cc.opt_fog;
++    out.opts0[2] = cc.opt_texture_edge;
++    out.opts0[3] = cc.opt_noise;
++    out.opts1[0] = cc.opt_alpha_threshold;
++    out.opts1[1] = cc.opt_invisible;
++    out.opts1[2] = cc.opt_grayscale;
++    out.clamps[0] = cc.usedTextures[0] && cc.clamp[0][0];
++    out.clamps[1] = cc.usedTextures[0] && cc.clamp[0][1];
++    out.clamps[2] = cc.usedTextures[1] && cc.clamp[1][0];
++    out.clamps[3] = cc.usedTextures[1] && cc.clamp[1][1];
++    out.misc[2] = cc.c[1][1][2] == SHADER_COMBINED;
++    out.misc[3] = cc.c[1][0][2] == SHADER_COMBINED;
++}
++
++ShaderProgram* GfxRenderingAPIXenos::CreateAndLoadNewShader(uint64_t shaderId0, uint64_t shaderId1) {
++    CCFeatures cc;
++    gfx_cc_get_features(shaderId0, shaderId1, &cc);
++    ShaderProgram& prg = mShaderPool[std::make_pair(shaderId0, shaderId1)];
++    prg.shaderId0 = shaderId0;
++    prg.shaderId1 = shaderId1;
++    prg.numInputs = cc.numInputs;
++    prg.usedTextures[0] = cc.usedTextures[0];
++    prg.usedTextures[1] = cc.usedTextures[1];
++    prg.twoCycle = cc.opt_2cyc;
++    prg.mayKill = cc.opt_alpha && (cc.opt_texture_edge || cc.opt_alpha_threshold);
++    prg.primDepth = cc.opt_prim_depth;
++    prg.vertex = VertexShaderFor(cc, &prg.numFloats);
++    BuildCombinerConstants(cc, prg.constants);
++    if (cc.used_masks[0] || cc.used_masks[1]) {
++        static bool warned = false;
++        if (!warned) {
++            warned = true;
++            xsdk_log_write("xenos: texture masks/blends (alternate assets) are not drawn yet");
++        }
++    }
++    LoadShader(&prg);
++    return &prg;
++}
++
++ShaderProgram* GfxRenderingAPIXenos::LookupShader(uint64_t shaderId0, uint64_t shaderId1) {
++    auto it = mShaderPool.find(std::make_pair(shaderId0, shaderId1));
++    return it == mShaderPool.end() ? nullptr : &it->second;
++}
++
++void GfxRenderingAPIXenos::ShaderGetInfo(ShaderProgram* prg, uint8_t* numInputs, bool usedTextures[2]) {
++    *numInputs = prg->numInputs;
++    usedTextures[0] = prg->usedTextures[0];
++    usedTextures[1] = prg->usedTextures[1];
++}
++
++void GfxRenderingAPIXenos::UnloadShader(ShaderProgram* oldPrg) {
++}
++
++void GfxRenderingAPIXenos::LoadShader(ShaderProgram* newPrg) {
++    mCurrentShader = newPrg;
++}
++
++void GfxRenderingAPIXenos::ClearShaderCache() {
++    // The programs hold only constants and point at shared shaders; the shaders stay loaded.
++}
++
++// ---------------------------------------------------------------------------------------------------------------
++// Textures
++
++XenosTexture& GfxRenderingAPIXenos::Texture(uint32_t id) {
++    if (id >= mTextures.size()) {
++        mTextures.resize(id + 1);
++    }
++    return mTextures[id];
++}
++
++uint32_t GfxRenderingAPIXenos::NewTexture() {
++    if (!mFreeTextureIds.empty()) {
++        const uint32_t id = mFreeTextureIds.back();
++        mFreeTextureIds.pop_back();
++        mTextures[id] = XenosTexture();
++        return id;
++    }
++    mTextures.emplace_back();
++    return (uint32_t)mTextures.size() - 1;
++}
++
++void GfxRenderingAPIXenos::DeleteTexture(uint32_t texId) {
++    if (texId == 0 || texId >= mTextures.size()) {
++        return;
++    }
++    XenosTexture& t = mTextures[texId];
++    GpuFreeLater(t.memory, t.bytes);
++    t = XenosTexture();
++    mFreeTextureIds.push_back(texId);
++}
++
++void GfxRenderingAPIXenos::SelectTexture(int tile, uint32_t textureId) {
++    mCurrentTextureIds[tile] = textureId;
++    mCurrentTile = tile;
++}
++
++bool GfxRenderingAPIXenos::CreateTextureStorage(XenosTexture& t, uint32_t format, uint32_t width, uint32_t height,
++                                                bool resolveTarget) {
++    // Memory the GPU may still read from goes back only once this frame's fence lands.
++    GpuFreeLater(t.memory, t.bytes);
++    t.memory = nullptr;
++    XsdkTexture tex = {};
++    if (!NT_SUCCESS(xsdk_texture_init(&tex, format, width, height, 1, true))) {
++        return false;
++    }
++    if (resolveTarget) {
++        // A resolve writes the base at the corner; a small texture's base would otherwise sit in the packed tail.
++        xsdk_texture_base_at_corner(&tex);
++    }
++    volatile uint32_t* mem = GpuAlloc(tex.size_bytes);
++    if (!mem) {
++        return false;
++    }
++    xsdk_texture_attach(&tex, mem);
++    t.texture = tex;
++    t.memory = mem;
++    t.bytes = tex.size_bytes;
++    t.width = (uint16_t)width;
++    t.height = (uint16_t)height;
++    t.samplerDirty = true;
++    return true;
++}
++
++void GfxRenderingAPIXenos::UploadTexture(const uint8_t* rgba32Buf, uint32_t width, uint32_t height) {
++    if (width == 0 || height == 0) {
++        return;
++    }
++    XenosTexture& t = Texture(mCurrentTextureIds[mCurrentTile]);
++    // Bytes red, green, blue, alpha: as a big-endian word, R8G8B8A8.
++    if (!CreateTextureStorage(t, XSDK_FORMAT_R8G8B8A8, width, height, false)) {
++        return;
++    }
++    xsdk_texture_upload(&t.texture, 0, rgba32Buf, width * 4);
++    xsdk_gpu_invalidate(t.texture.address, t.texture.size_bytes);
++}
++
++void GfxRenderingAPIXenos::SetSamplerParameters(int tile, bool linear_filter, uint32_t cms, uint32_t cmt) {
++    XenosTexture& t = Texture(mCurrentTextureIds[tile]);
++    const bool linear = linear_filter && mFilterMode == FILTER_LINEAR;
++    const bool threePoint = linear_filter && mFilterMode == FILTER_THREE_POINT;
++    const uint32_t u = AddressMode(cms);
++    const uint32_t v = AddressMode(cmt);
++    if (t.linear != linear || t.threePoint != threePoint || t.addressU != u || t.addressV != v) {
++        t.linear = linear;
++        t.threePoint = threePoint;
++        t.addressU = u;
++        t.addressV = v;
++        t.samplerDirty = true;
++    }
++}
++
++void GfxRenderingAPIXenos::ApplySampler(XenosTexture& t) {
++    if (!t.samplerDirty) {
++        return;
++    }
++    XsdkSampler s = {};
++    s.mag_filter = t.linear ? XSDK_FILTER_LINEAR : XSDK_FILTER_POINT;
++    s.min_filter = s.mag_filter;
++    s.mip_filter = XSDK_FILTER_POINT;
++    s.address_u = t.addressU;
++    s.address_v = t.addressV;
++    xsdk_texture_sampler_state(&t.sampler, &s);
++    t.samplerDirty = false;
++}
++
++void GfxRenderingAPIXenos::SetTextureFilter(FilteringMode mode) {
++    mFilterMode = mode;
++}
++
++FilteringMode GfxRenderingAPIXenos::GetTextureFilter() {
++    return mFilterMode;
++}
++
++void GfxRenderingAPIXenos::SetSrgbMode() {
++}
++
++ImTextureID GfxRenderingAPIXenos::GetTextureById(int id) {
++    return (ImTextureID)(uintptr_t)id;
++}
++
++// ---------------------------------------------------------------------------------------------------------------
++// State
++
++void GfxRenderingAPIXenos::SetDepthTestAndMask(bool depth_test, bool z_upd) {
++    mCurrentDepthTest = depth_test;
++    mCurrentDepthMask = z_upd;
++}
++
++void GfxRenderingAPIXenos::SetCurrentPrimDepth(float depth) {
++    mCurrentPrimDepth = depth;
++}
++
++void GfxRenderingAPIXenos::SetZmodeDecal(bool decal) {
++    mCurrentZmodeDecal = decal;
++}
++
++void GfxRenderingAPIXenos::SetViewport(int x, int y, int width, int height) {
++    mViewport[0] = x;
++    mViewport[1] = y;
++    mViewport[2] = width;
++    mViewport[3] = height;
++    mViewportDirty = true;
++}
++
++void GfxRenderingAPIXenos::SetScissor(int x, int y, int width, int height) {
++    mScissor[0] = x;
++    mScissor[1] = y;
++    mScissor[2] = width;
++    mScissor[3] = height;
++    mScissorDirty = true;
++}
++
++void GfxRenderingAPIXenos::SetUseAlpha(bool useAlpha) {
++    mUseAlpha = useAlpha;
++}
++
++void GfxRenderingAPIXenos::ResetDrawState() {
++    mStateValid = false;
++    mLastDepthKey = -1;
++    mLastBlend = -1;
++    mLastDecal = -1;
++    mLastVertex = nullptr;
++    mLastPixel = nullptr;
++    mViewportDirty = true;
++    mScissorDirty = true;
++}
++
++// ---------------------------------------------------------------------------------------------------------------
++// Framebuffers and eDRAM
++
++int GfxRenderingAPIXenos::CreateFramebuffer() {
++    XenosFramebuffer fb;
++    fb.textureId = NewTexture();
++    mFramebuffers.push_back(fb);
++    return (int)mFramebuffers.size() - 1;
++}
++
++void GfxRenderingAPIXenos::UpdateFramebufferParameters(int fb_id, uint32_t width, uint32_t height,
++                                                       uint32_t msaa_level, bool opengl_invertY, bool render_target,
++                                                       bool has_depth_buffer, bool can_extract_depth) {
++    if (fb_id < 0 || fb_id >= (int)mFramebuffers.size()) {
++        return;
++    }
++    XenosFramebuffer& fb = mFramebuffers[fb_id];
++    width = std::max(width, 1u);
++    height = std::max(height, 1u);
++    if (fb.width != width || fb.height != height) {
++        if (mBoundFb == fb_id) {
++            ResolveBound(false);
++        }
++        fb.width = width;
++        fb.height = height;
++        fb.textureValid = false;
++    }
++    fb.hasDepth = has_depth_buffer;
++}
++
++void GfxRenderingAPIXenos::ResolveBound(bool keepBound) {
++    if (mBoundFb < 0) {
++        return;
++    }
++    XenosFramebuffer& fb = mFramebuffers[mBoundFb];
++    if (mBoundDirty) {
++        XenosTexture& t = Texture(fb.textureId);
++        if (!t.memory || t.width != fb.width || t.height != fb.height) {
++            CreateTextureStorage(t, XSDK_FORMAT_A8R8G8B8, fb.width, fb.height, true);
++            t.linear = true;
++            t.addressU = t.addressV = XSDK_ADDRESS_CLAMP;
++            t.samplerDirty = true;
++        }
++        if (t.memory) {
++            // Keep eDRAM as it is when the framebuffer stays bound; clear it when leaving.
++            xsdk_gpu_set_resolve_clears(!keepBound, !keepBound);
++            xsdk_gpu_resolve_texture(&t.texture, 0xFF000000);
++            xsdk_gpu_set_resolve_clears(true, true);
++            fb.textureValid = true;
++        }
++        mBoundDirty = false;
++    }
++    ResetDrawState();
++    if (keepBound) {
++        // A resolve takes the target away; set it again, eDRAM still holding the colour and depth.
++        xsdk_gpu_set_target(fb.width, fb.height);
++    } else {
++        mBoundFb = -1;
++    }
++}
++
++void GfxRenderingAPIXenos::BindTarget(int fbId) {
++    if (mBoundFb == fbId) {
++        return;
++    }
++    ResolveBound(false);
++    XenosFramebuffer& fb = mFramebuffers[fbId];
++    xsdk_gpu_set_target(fb.width, fb.height);
++    ResetDrawState();
++    mBoundFb = fbId;
++    mBoundDirty = false;
++    mTargetHeight = fb.height;
++    mNeedsRestore = fb.textureValid;
++}
++
++void GfxRenderingAPIXenos::DrawTexturedRect(const XenosTexture& tex, float u0, float v0, float u1, float v1,
++                                            float x0, float y0, float x1, float y1) {
++    // x and y in clip space, -1 to 1, y up.
++    const uint32_t white = 0xFFFFFFFF;
++    const UiVertex quad[4] = {
++        { x0, y0, u0, v1, white },
++        { x1, y0, u1, v1, white },
++        { x0, y1, u0, v0, white },
++        { x1, y1, u1, v0, white },
++    };
++    uint32_t address;
++    volatile uint32_t* mem = VertexSpace(sizeof quad, &address);
++    if (!mem) {
++        return;
++    }
++    WriteWords(mem, quad, sizeof quad);
++    xsdk_gpu_invalidate(address, sizeof quad);
++    xsdk_gpu_set_shaders(&mBlitVertex, &mBlitPixel);
++    xsdk_built_shader_set_literals(&ui_vert);
++    xsdk_built_shader_set_literals(&ui_frag);
++    const float push[8] = { 1, 1, 0, 0, 0, 0, 0, 0 };
++    xsdk_gpu_set_vertex_constants(UI_VERT_PUSH, push, UI_VERT_PUSH_REGISTERS);
++    xsdk_gpu_set_depth_stencil(&mDepthStates[0]);
++    xsdk_gpu_set_blend(&mBlendOff);
++    xsdk_gpu_set_raster(&mRasterNormal);
++    const XenosFramebuffer& fb = mFramebuffers[mBoundFb];
++    xsdk_gpu_set_viewport(0, 0, (float)fb.width, (float)fb.height, 0, 1);
++    xsdk_gpu_set_scissor(0, 0, fb.width, fb.height);
++    xsdk_gpu_set_texture(UI_FRAG_SAMPLER_0_0, &tex.texture, &mBlitSampler);
++    xsdk_gpu_set_vertices(0, address, sizeof quad);
++    xsdk_gpu_draw(XSDK_PRIMITIVE_TRIANGLE_STRIP, 4);
++    ResetDrawState();
++    mBoundDirty = true;
++}
++
++void GfxRenderingAPIXenos::RestoreIfNeeded() {
++    if (!mNeedsRestore) {
++        return;
++    }
++    mNeedsRestore = false;
++    const XenosFramebuffer& fb = mFramebuffers[mBoundFb];
++    const XenosTexture& t = Texture(fb.textureId);
++    if (t.memory) {
++        DrawTexturedRect(t, 0, 0, 1, 1, -1, -1, 1, 1);
++    }
++}
++
++void GfxRenderingAPIXenos::StartDrawToFramebuffer(int fbId, float noiseScale) {
++    if (fbId < 0 || fbId >= (int)mFramebuffers.size()) {
++        return;
++    }
++    if (noiseScale != 0.0f) {
++        mNoiseScale = 1.0f / noiseScale;
++    }
++    mCurrentFb = fbId;
++    BindTarget(fbId);
++}
++
++void GfxRenderingAPIXenos::ClearFramebuffer(bool color, bool depth) {
++    if (mBoundFb < 0) {
++        BindTarget(mCurrentFb);
++    }
++    if (color) {
++        mNeedsRestore = false;
++    } else {
++        RestoreIfNeeded();
++    }
++    const XenosFramebuffer& fb = mFramebuffers[mBoundFb];
++    // A quad at the far plane: black, depth 1, as the other backends clear.
++    const uint32_t black = 0xFF000000;
++    const UiVertex quad[4] = {
++        { -1, -1, 0, 0, black },
++        { 1, -1, 0, 0, black },
++        { -1, 1, 0, 0, black },
++        { 1, 1, 0, 0, black },
++    };
++    uint32_t address;
++    volatile uint32_t* mem = VertexSpace(sizeof quad, &address);
++    if (!mem) {
++        return;
++    }
++    WriteWords(mem, quad, sizeof quad);
++    xsdk_gpu_invalidate(address, sizeof quad);
++    static XsdkDepthStencilState depthAlways, depthNone;
++    static XsdkBlendState colorWrite, colorNone;
++    static bool made = false;
++    if (!made) {
++        made = true;
++        XsdkDepthStencil d = {};
++        d.depth_test = true;
++        d.depth_write = true;
++        d.depth_compare = XSDK_COMPARE_ALWAYS;
++        xsdk_gpu_depth_stencil_state(&depthAlways, &d);
++        d.depth_write = false;
++        d.depth_test = false;
++        xsdk_gpu_depth_stencil_state(&depthNone, &d);
++        XsdkBlend b = { XSDK_BLEND_ONE, XSDK_BLEND_ZERO, XSDK_BLEND_OP_ADD, XSDK_BLEND_ONE, XSDK_BLEND_ZERO,
++                        XSDK_BLEND_OP_ADD, XSDK_WRITE_ALL, false };
++        xsdk_gpu_blend_state(&colorWrite, &b);
++        b.write_mask = 0;
++        xsdk_gpu_blend_state(&colorNone, &b);
++    }
++    // The UI shader multiplies the vertex colour by a texel: white's, so the clear colour comes out as given.
++    const XenosTexture& any = Texture(mWhiteTexture);
++    xsdk_gpu_set_shaders(&mBlitVertex, &mBlitPixel);
++    xsdk_built_shader_set_literals(&ui_vert);
++    xsdk_built_shader_set_literals(&ui_frag);
++    const float push[8] = { 1, 1, 0, 0, 1, 0, 0, 0 };
++    xsdk_gpu_set_vertex_constants(UI_VERT_PUSH, push, UI_VERT_PUSH_REGISTERS);
++    xsdk_gpu_set_depth_stencil(depth && fb.hasDepth ? &depthAlways : &depthNone);
++    xsdk_gpu_set_blend(color ? &colorWrite : &colorNone);
++    xsdk_gpu_set_raster(&mRasterNormal);
++    xsdk_gpu_set_viewport(0, 0, (float)fb.width, (float)fb.height, 0, 1);
++    xsdk_gpu_set_scissor(0, 0, fb.width, fb.height);
++    xsdk_gpu_set_texture(UI_FRAG_SAMPLER_0_0, &any.texture, &mBlitSampler);
++    xsdk_gpu_set_vertices(0, address, sizeof quad);
++    xsdk_gpu_draw(XSDK_PRIMITIVE_TRIANGLE_STRIP, 4);
++    ResetDrawState();
++    mBoundDirty = true;
++}
++
++void GfxRenderingAPIXenos::CopyFramebuffer(int fbDstId, int fbSrcId, int srcX0, int srcY0, int srcX1, int srcY1,
++                                           int dstX0, int dstY0, int dstX1, int dstY1) {
++    if (fbDstId < 0 || fbSrcId < 0 || fbDstId >= (int)mFramebuffers.size() ||
++        fbSrcId >= (int)mFramebuffers.size()) {
++        return;
++    }
++    const int previous = mCurrentFb;
++    // The source's colour must be in its texture.
++    if (mBoundFb == fbSrcId && mBoundDirty) {
++        ResolveBound(true);
++    }
++    XenosFramebuffer& src = mFramebuffers[fbSrcId];
++    const XenosTexture& st = Texture(src.textureId);
++    if (!st.memory || !src.textureValid) {
++        return;
++    }
++    BindTarget(fbDstId);
++    RestoreIfNeeded();
++    const XenosFramebuffer& dst = mFramebuffers[fbDstId];
++    // Rectangles from the top-left, as the Direct3D 11 backend takes them.
++    const float u0 = (float)srcX0 / src.width, u1 = (float)srcX1 / src.width;
++    const float v0 = (float)srcY0 / src.height, v1 = (float)srcY1 / src.height;
++    const float x0 = 2.0f * dstX0 / dst.width - 1.0f, x1 = 2.0f * dstX1 / dst.width - 1.0f;
++    const float y0 = 1.0f - 2.0f * dstY1 / dst.height, y1 = 1.0f - 2.0f * dstY0 / dst.height;
++    DrawTexturedRect(st, u0, v0, u1, v1, x0, y0, x1, y1);
++    if (previous != fbDstId) {
++        BindTarget(previous);
++    }
++}
++
++void GfxRenderingAPIXenos::ResolveMSAAColorBuffer(int fbIdTarget, int fbIdSrc) {
++    // No MSAA yet: a copy of the whole framebuffer.
++    if (fbIdTarget < 0 || fbIdSrc < 0 || fbIdTarget >= (int)mFramebuffers.size() ||
++        fbIdSrc >= (int)mFramebuffers.size()) {
++        return;
++    }
++    const XenosFramebuffer& s = mFramebuffers[fbIdSrc];
++    const XenosFramebuffer& d = mFramebuffers[fbIdTarget];
++    CopyFramebuffer(fbIdTarget, fbIdSrc, 0, 0, s.width, s.height, 0, 0, d.width, d.height);
++}
++
++void GfxRenderingAPIXenos::ReadFramebufferToCPU(int fbId, uint32_t width, uint32_t height, uint16_t* rgba16Buf) {
++    if (fbId < 0 || fbId >= (int)mFramebuffers.size()) {
++        return;
++    }
++    if (mBoundFb == fbId && mBoundDirty) {
++        ResolveBound(true);
++    }
++    const XenosFramebuffer& fb = mFramebuffers[fbId];
++    const XenosTexture& t = Texture(fb.textureId);
++    if (!t.memory || !fb.textureValid) {
++        memset(rgba16Buf, 0, width * height * 2);
++        return;
++    }
++    // Wait for the GPU to finish the resolve, then read the texture back (slow: write-combined memory).
++    xsdk_gpu_wait(xsdk_gpu_fence(), kFenceTimeoutMs);
++    std::vector<uint32_t> pixels((size_t)fb.width * fb.height);
++    xsdk_texture_download_rows(&t.texture, 0, 0, fb.height, pixels.data(), fb.width * 4);
++    for (uint32_t j = 0; j < height; j++) {
++        const uint32_t sy = j * fb.height / height;
++        for (uint32_t i = 0; i < width; i++) {
++            const uint32_t sx = i * fb.width / width;
++            const uint32_t p = pixels[(size_t)sy * fb.width + sx]; // 0xAARRGGBB
++            const uint32_t r = ((((p >> 16) & 0xFF) + 4) * 0x1F) / 0xFF;
++            const uint32_t g = ((((p >> 8) & 0xFF) + 4) * 0x1F) / 0xFF;
++            const uint32_t b = (((p & 0xFF) + 4) * 0x1F) / 0xFF;
++            const uint32_t a = (p >> 24) ? 1 : 0;
++            rgba16Buf[i + j * width] = (uint16_t)((r << 11) | (g << 6) | (b << 1) | a);
++        }
++    }
++}
++
++std::unordered_map<std::pair<float, float>, uint16_t, hash_pair_ff>
++GfxRenderingAPIXenos::GetPixelDepth(int fb_id, const std::set<std::pair<float, float>>& coordinates) {
++    // Not read back yet: every point reads as far, so what the game tests for being hidden reads as visible.
++    std::unordered_map<std::pair<float, float>, uint16_t, hash_pair_ff> res;
++    for (const auto& c : coordinates) {
++        res.emplace(c, (uint16_t)0xFFFC);
++    }
++    return res;
++}
++
++void* GfxRenderingAPIXenos::GetFramebufferTextureId(int fbId) {
++    if (fbId < 0 || fbId >= (int)mFramebuffers.size()) {
++        return nullptr;
++    }
++    return (void*)(uintptr_t)mFramebuffers[fbId].textureId;
++}
++
++void GfxRenderingAPIXenos::SelectTextureFb(int fbId) {
++    if (fbId < 0 || fbId >= (int)mFramebuffers.size()) {
++        return;
++    }
++    if (mBoundFb == fbId && mBoundDirty) {
++        ResolveBound(true);
++    }
++    SelectTexture(0, mFramebuffers[fbId].textureId);
++}
++
++// ---------------------------------------------------------------------------------------------------------------
++// Drawing
++
++volatile uint32_t* GfxRenderingAPIXenos::VertexSpace(uint32_t bytes, uint32_t* address) {
++    bytes = (bytes + 63) & ~63u;
++    volatile uint32_t* ring = mVertexRing[mRingIndex];
++    if (!ring) {
++        return nullptr;
++    }
++    if (mVertexOffset + bytes > kVertexRingBytes) {
++        // This frame filled its part: wait for the GPU to finish what it queued, then start the part over.
++        mOverflowDraws++;
++        xsdk_gpu_wait(xsdk_gpu_fence(), kFenceTimeoutMs);
++        mVertexOffset = 0;
++    }
++    volatile uint32_t* mem = ring + mVertexOffset / 4;
++    *address = xsdk_gpu_address(mem);
++    mVertexOffset += bytes;
++    return mem;
++}
++
++void GfxRenderingAPIXenos::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris) {
++    ShaderProgram* prg = mCurrentShader;
++    if (!prg || !prg->vertex || buf_vbo_num_tris == 0) {
++        return;
++    }
++    if (mBoundFb < 0) {
++        BindTarget(mCurrentFb);
++    }
++    RestoreIfNeeded();
++
++    // Textures and the pixel shader variant they call for.
++    XenosTexture* tex[2] = { nullptr, nullptr };
++    uint32_t variant = 0;
++    for (int t = 0; t < 2; t++) {
++        if (!prg->usedTextures[t]) {
++            continue;
++        }
++        XenosTexture& x = Texture(mCurrentTextureIds[t]);
++        if (!x.memory) {
++            continue;
++        }
++        ApplySampler(x);
++        tex[t] = &x;
++        if (x.threePoint) {
++            variant |= t == 0 ? XENOS_PS_TP0 : XENOS_PS_TP1;
++        }
++    }
++    if (prg->twoCycle) {
++        variant |= XENOS_PS_CYC2;
++    }
++    if (prg->mayKill) {
++        variant |= XENOS_PS_KILL;
++    }
++    const XsdkShader* pixel = &mPixelShaders[variant];
++
++    if (prg->vertex != mLastVertex || pixel != mLastPixel) {
++        xsdk_gpu_set_shaders(prg->vertex, pixel);
++        xsdk_built_shader_set_literals(&fast3d_vert);
++        xsdk_built_shader_set_literals(kPixelVariants[variant]);
++        mLastVertex = prg->vertex;
++        mLastPixel = pixel;
++    }
++
++    const int depthKey = (mCurrentDepthTest ? 4 : 0) | (mCurrentDepthMask ? 2 : 0) | (mCurrentZmodeDecal ? 1 : 0);
++    if (depthKey != mLastDepthKey) {
++        xsdk_gpu_set_depth_stencil(&mDepthStates[depthKey]);
++        mLastDepthKey = depthKey;
++    }
++    if ((int8_t)mUseAlpha != mLastBlend) {
++        xsdk_gpu_set_blend(mUseAlpha ? &mBlendAlpha : &mBlendOff);
++        mLastBlend = mUseAlpha;
++    }
++    if ((int8_t)mCurrentZmodeDecal != mLastDecal) {
++        xsdk_gpu_set_raster(mCurrentZmodeDecal ? &mRasterDecal : &mRasterNormal);
++        mLastDecal = mCurrentZmodeDecal;
++    }
++    if (mViewportDirty) {
++        xsdk_gpu_set_viewport((float)mViewport[0], (float)(mTargetHeight - mViewport[1] - mViewport[3]),
++                              (float)mViewport[2], (float)mViewport[3], 0.0f, 1.0f);
++        mViewportDirty = false;
++    }
++    if (mScissorDirty) {
++        int x = std::max(mScissor[0], 0);
++        int y = std::max((int)mTargetHeight - mScissor[1] - mScissor[3], 0);
++        int w = std::max(std::min(mScissor[0] + mScissor[2], (int)mFramebuffers[mBoundFb].width) - x, 0);
++        int h = std::max(std::min((int)mTargetHeight - mScissor[1], (int)mTargetHeight) - y, 0);
++        xsdk_gpu_set_scissor(x, y, w, h);
++        mScissorDirty = false;
++    }
++
++    // Constants: the combiner's, then what this draw's textures and frame add.
++    XenosCombinerConstants k = prg->constants;
++    for (int t = 0; t < 2; t++) {
++        k.sizes[t * 2] = tex[t] ? (float)tex[t]->width : 1.0f;
++        k.sizes[t * 2 + 1] = tex[t] ? (float)tex[t]->height : 1.0f;
++    }
++    k.misc[0] = (float)(mFrameCount % 150);
++    k.misc[1] = mNoiseScale;
++    xsdk_gpu_set_pixel_constants(FAST3D_V0_FRAG_PUSH, &k.color0.ab[0][0], FAST3D_V0_FRAG_PUSH_REGISTERS);
++    const float prim[4] = { prg->primDepth ? 1.0f : 0.0f, mCurrentPrimDepth, 0.0f, 0.0f };
++    xsdk_gpu_set_vertex_constants(FAST3D_VERT_PUSH, prim, FAST3D_VERT_PUSH_REGISTERS);
++
++    // Each sampler gets a texture, the font's white where the combiner reads none (weighted by 0 then).
++    for (int t = 0; t < 2; t++) {
++        const XenosTexture* x = tex[t] ? tex[t] : &Texture(mWhiteTexture);
++        if (x->memory) {
++            xsdk_gpu_set_texture(t == 0 ? FAST3D_V0_FRAG_SAMPLER_0_0 : FAST3D_V0_FRAG_SAMPLER_0_1, &x->texture,
++                                 &x->sampler);
++        }
++    }
++
++    const uint32_t bytes = (uint32_t)(buf_vbo_len * sizeof(float));
++    uint32_t address;
++    volatile uint32_t* mem = VertexSpace(bytes, &address);
++    if (!mem) {
++        return;
++    }
++    WriteWords(mem, buf_vbo, bytes);
++    xsdk_gpu_invalidate(address, bytes);
++    xsdk_gpu_set_vertices(0, address, bytes);
++    xsdk_gpu_draw(XSDK_PRIMITIVE_TRIANGLE_LIST, (uint32_t)(3 * buf_vbo_num_tris));
++    mBoundDirty = true;
++    mDrawsThisFrame++;
++}
++
++// ---------------------------------------------------------------------------------------------------------------
++// Frames
++
++void GfxRenderingAPIXenos::StartFrame() {
++    mFrameCount++;
++    mDrawsThisFrame = 0;
++}
++
++void GfxRenderingAPIXenos::EndFrame() {
++    // The screen into the front buffer.
++    if (mBoundFb != 0) {
++        BindTarget(0);
++    }
++    RestoreIfNeeded();
++    uint32_t address = 0;
++    if (NT_SUCCESS(xsdk_present_begin(&address, kBeginTimeoutMs))) {
++        xsdk_gpu_resolve(address, mFramebuffers[0].width, mFramebuffers[0].height, 0xFF000000);
++        xsdk_present_end();
++    } else {
++        xsdk_log_write("xenos: no front buffer came free");
++        xsdk_gpu_resolve(xsdk_present_buffer_address(0), mFramebuffers[0].width, mFramebuffers[0].height,
++                         0xFF000000);
++    }
++    mBoundFb = -1;
++    mBoundDirty = false;
++    mFramebuffers[0].textureValid = false;
++    ResetDrawState();
++
++    const uint32_t fence = xsdk_gpu_fence();
++    mFrameFence[mRingIndex] = fence;
++    mFenceOfFrame[mFrame] = fence;
++    mFrame++;
++    mRingIndex = (mRingIndex + 1) % kFramesInFlight;
++    // The ring part this frame takes was last used kFramesInFlight frames ago.
++    if (mFrameFence[mRingIndex]) {
++        xsdk_gpu_wait(mFrameFence[mRingIndex], kFenceTimeoutMs);
++    }
++    mVertexOffset = 0;
++    GpuReclaim();
++
++    if ((mFrame % 600) == 0) {
++        XsdkGpuStats st;
++        xsdk_gpu_stats(&st);
++        XsdkPresentStats ps;
++        xsdk_present_stats(&ps);
++        xsdk_log_write("xenos: frame %llu draws %llu shaders %u layouts %u pools %u overflows %u missed %u",
++                       (unsigned long long)mFrame, (unsigned long long)mDrawsThisFrame, (unsigned)mShaderPool.size(),
++                       (unsigned)mVertexShaders.size(), (unsigned)mPools.size(), (unsigned)mOverflowDraws,
++                       (unsigned)ps.missed);
++    }
++}
++
++void GfxRenderingAPIXenos::FinishRender() {
++}
++
++// ---------------------------------------------------------------------------------------------------------------
++// Dear ImGui
++
++void GfxRenderingAPIXenos::ImGuiInit() {
++    ImGuiIO& io = ImGui::GetIO();
++    io.BackendRendererName = "xenos";
++    io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
++    unsigned char* pixels = nullptr;
++    int width = 0, height = 0;
++    io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
++    mFontTexture = NewTexture();
++    SelectTexture(0, mFontTexture);
++    UploadTexture(pixels, width, height);
++    SetSamplerParameters(0, true, G_TX_CLAMP, G_TX_CLAMP);
++    XenosTexture& f = Texture(mFontTexture);
++    f.linear = true;
++    f.threePoint = false;
++    f.samplerDirty = true;
++    io.Fonts->SetTexID((ImTextureID)(uintptr_t)mFontTexture);
++}
++
++void GfxRenderingAPIXenos::ImGuiShutdown() {
++}
++
++void GfxRenderingAPIXenos::ImGuiRenderDrawData(ImDrawData* data) {
++    if (!data || data->CmdListsCount == 0 || data->DisplaySize.x <= 0 || data->DisplaySize.y <= 0) {
++        return;
++    }
++    if (mBoundFb != 0) {
++        BindTarget(0);
++    }
++    RestoreIfNeeded();
++    const XenosFramebuffer& fb = mFramebuffers[0];
++    // Pixels from DisplayPos, y down, into clip space.
++    const float sx = 2.0f / data->DisplaySize.x;
++    const float sy = -2.0f / data->DisplaySize.y;
++    const float push[8] = { sx, sy, -1.0f - data->DisplayPos.x * sx, 1.0f - data->DisplayPos.y * sy, 0, 0, 0, 0 };
++
++    xsdk_gpu_set_shaders(&mBlitVertex, &mBlitPixel);
++    xsdk_built_shader_set_literals(&ui_vert);
++    xsdk_built_shader_set_literals(&ui_frag);
++    xsdk_gpu_set_vertex_constants(UI_VERT_PUSH, push, UI_VERT_PUSH_REGISTERS);
++    xsdk_gpu_set_depth_stencil(&mDepthStates[0]);
++    xsdk_gpu_set_blend(&mBlendAlpha);
++    xsdk_gpu_set_raster(&mRasterNormal);
++    xsdk_gpu_set_viewport(0, 0, (float)fb.width, (float)fb.height, 0, 1);
++
++    for (int n = 0; n < data->CmdListsCount; n++) {
++        const ImDrawList* list = data->CmdLists[n];
++        const uint32_t vbytes = list->VtxBuffer.Size * sizeof(ImDrawVert);
++        const uint32_t ibytes = (list->IdxBuffer.Size * sizeof(ImDrawIdx) + 3) & ~3u;
++        uint32_t vaddr, iaddr;
++        volatile uint32_t* vmem = VertexSpace(vbytes, &vaddr);
++        volatile uint32_t* imem = VertexSpace(ibytes, &iaddr);
++        if (!vmem || !imem) {
++            break;
++        }
++        WriteWords(vmem, list->VtxBuffer.Data, vbytes);
++        if (list->IdxBuffer.Size & 1) {
++            // An odd count of 16-bit indices: the last word's second half is padding.
++            std::vector<ImDrawIdx> padded(list->IdxBuffer.Data, list->IdxBuffer.Data + list->IdxBuffer.Size);
++            padded.push_back(0);
++            WriteWords(imem, padded.data(), ibytes);
++        } else {
++            WriteWords(imem, list->IdxBuffer.Data, ibytes);
++        }
++        xsdk_gpu_invalidate(vaddr, vbytes);
++        xsdk_gpu_invalidate(iaddr, ibytes);
++
++        for (const ImDrawCmd& cmd : list->CmdBuffer) {
++            if (cmd.UserCallback) {
++                if (cmd.UserCallback != ImDrawCallback_ResetRenderState) {
++                    cmd.UserCallback(list, &cmd);
++                }
++                continue;
++            }
++            const float cx0 = cmd.ClipRect.x - data->DisplayPos.x, cy0 = cmd.ClipRect.y - data->DisplayPos.y;
++            const float cx1 = cmd.ClipRect.z - data->DisplayPos.x, cy1 = cmd.ClipRect.w - data->DisplayPos.y;
++            if (cx1 <= cx0 || cy1 <= cy0) {
++                continue;
++            }
++            const uint32_t x = (uint32_t)std::max(cx0, 0.0f), y = (uint32_t)std::max(cy0, 0.0f);
++            const uint32_t w = (uint32_t)std::min(cx1, (float)fb.width) - x;
++            const uint32_t h = (uint32_t)std::min(cy1, (float)fb.height) - y;
++            xsdk_gpu_set_scissor(x, y, w, h);
++            const uint32_t id = (uint32_t)(uintptr_t)cmd.GetTexID();
++            XenosTexture& t = Texture(id);
++            if (!t.memory) {
++                continue;
++            }
++            ApplySampler(t);
++            xsdk_gpu_set_texture(UI_FRAG_SAMPLER_0_0, &t.texture, &t.sampler);
++            xsdk_gpu_set_vertices(0, vaddr + cmd.VtxOffset * sizeof(ImDrawVert),
++                                  vbytes - cmd.VtxOffset * sizeof(ImDrawVert));
++            xsdk_gpu_draw_indexed(XSDK_PRIMITIVE_TRIANGLE_LIST, iaddr + cmd.IdxOffset * sizeof(ImDrawIdx),
++                                  cmd.ElemCount, sizeof(ImDrawIdx) == 4);
++        }
++    }
++    ResetDrawState();
++    mBoundDirty = true;
++}
++
++} // namespace Fast
++
++#endif
+diff --git a/src/fast/backends/xenos/fast3d.frag b/src/fast/backends/xenos/fast3d.frag
+new file mode 100644
+index 0000000..c4b9f8b
+--- /dev/null
++++ b/src/fast/backends/xenos/fast3d.frag
+@@ -0,0 +1,134 @@
++#version 450
++// Fast3D pixel shader template for the Xenos backend (gfx_xenos.cpp). CMake writes variants of it with defines
++// after the #version line (src/fast/CMakeLists.txt):
++//   TP0, TP1  three-point filtering of texture 0, 1      CYC2  the second combiner cycle
++//   KILL      texture edge / alpha threshold may discard
++// It follows libultraship's default.shader.glsl: per cycle, (a - b) * c + d for colour and alpha, then fog, texture
++// edge, noise, grayscale, alpha threshold and invisible. xost lowers no function calls and no discard beside another
++// branch, so the shader is branch-free: each of a - b, c and d is a weighted sum of the combiner's sources, the
++// weights worked out on the CPU from the combiner's mode (XenosCombiner in gfx_xenos.cpp), and options are 0 or 1
++// factors. Sources: inputs 1-7, texel0, texel0 alpha, texel1, texel1 alpha, combined, noise; 0 and 1 go in a constant.
++layout(location = 0) in vec4 v_uv;
++layout(location = 1) in vec4 v_clamp;
++layout(location = 2) in vec4 v_fog;
++layout(location = 3) in vec4 v_gray;
++layout(location = 4) in vec4 v_in1;
++layout(location = 5) in vec4 v_in2;
++layout(location = 6) in vec4 v_in3;
++layout(location = 7) in vec4 v_in4;
++layout(location = 8) in vec4 v_in5;
++layout(location = 9) in vec4 v_in6;
++layout(location = 10) in vec4 v_in7;
++layout(location = 0) out vec4 o_color;
++
++layout(set = 0, binding = 0) uniform sampler2D u_tex0;
++layout(set = 0, binding = 1) uniform sampler2D u_tex1;
++
++// One cycle's weights for colour or for alpha (XenosCycleWeights in gfx_xenos.cpp): [0] inputs 1-4, [1] inputs 5-7
++// and texel0, [2] texel0 alpha, texel1, texel1 alpha and combined, [3] x noise and y the constant term.
++struct Cycle {
++	vec4 ab[4];   // weights of a - b: in1, in2, in3, in4 | in5, in6, in7, t0 | t0a, t1, t1a, combined | noise, const
++	vec4 c[4];
++	vec4 d[4];
++};
++
++layout(push_constant) uniform Push {
++	Cycle color0;
++	Cycle alpha0;
++	Cycle color1;
++	Cycle alpha1;
++	vec4 opts0;    // alpha, fog, texture edge, noise
++	vec4 opts1;    // alpha threshold, invisible, grayscale, unused
++	vec4 clamps;   // clamp s0, t0, s1, t1: 0 or 1
++	vec4 sizes;    // texture 0 width, height, texture 1 width, height
++	vec4 misc;     // frame count, noise scale, cycle 2 alpha wrap (0 narrow, 1 wide), cycle 2 colour wrap
++} pc;
++
++// sum of w[0..3] over the sources, as vec4 per channel set: s1 = in1-4, s2 = in5-7,t0, s3 = t0a,t1,t1a,combined
++#define WSUM(W_, N_) ( \
++	v_in1 * (W_)[0].x + v_in2 * (W_)[0].y + v_in3 * (W_)[0].z + v_in4 * (W_)[0].w + \
++	v_in5 * (W_)[1].x + v_in6 * (W_)[1].y + v_in7 * (W_)[1].z + SA_ * (W_)[1].w + \
++	vec4(SA_.a) * (W_)[2].x + SB_ * (W_)[2].y + vec4(SB_.a) * (W_)[2].z + COMB_ * (W_)[2].w + \
++	vec4(N_) * (W_)[3].x + vec4((W_)[3].y))
++
++#define WRAP(x, lo, hi) (mod((x) - (lo), (hi) - (lo)) + (lo))
++
++// Three-point filtering as libultraship's filter3point; every value named once, as xost wants with a discard.
++#define THREE_POINT(P_, tex, uv, size) \
++	vec2 P_##f = fract((uv) * (size) - vec2(0.5)); \
++	vec2 P_##o = P_##f - vec2(step(1.0, P_##f.x + P_##f.y)); \
++	vec4 P_##c0 = texture(tex, (uv) - P_##o / (size)); \
++	vec4 P_##c1 = texture(tex, (uv) - vec2(P_##o.x - sign(P_##o.x), P_##o.y) / (size)); \
++	vec4 P_##c2 = texture(tex, (uv) - vec2(P_##o.x, P_##o.y - sign(P_##o.y)) / (size)); \
++	vec4 P_ = P_##c0 + abs(P_##o.x) * (P_##c1 - P_##c0) + abs(P_##o.y) * (P_##c2 - P_##c0);
++
++void main()
++{
++	vec2 size0 = pc.sizes.xy;
++	vec2 size1 = pc.sizes.zw;
++	// clamp() takes constant bounds on xost; min and max take any.
++	vec2 uv0 = mix(v_uv.xy, min(max(v_uv.xy, vec2(0.5) / size0), v_clamp.xy), pc.clamps.xy);
++	vec2 uv1 = mix(v_uv.zw, min(max(v_uv.zw, vec2(0.5) / size1), v_clamp.zw), pc.clamps.zw);
++#ifdef TP0
++	THREE_POINT(t0, u_tex0, uv0, size0)
++#else
++	vec4 t0 = texture(u_tex0, uv0);
++#endif
++#ifdef TP1
++	THREE_POINT(t1, u_tex1, uv1, size1)
++#else
++	vec4 t1 = texture(u_tex1, uv1);
++#endif
++
++	// A hash without sin, whose range on Xenos is about -pi to pi (xsc.md, "Approximate builtins").
++	vec3 np0 = fract(vec3(floor(gl_FragCoord.xy * pc.misc.y), pc.misc.x) * vec3(0.1031, 0.1030, 0.0973));
++	vec3 np = np0 + vec3(dot(np0, np0.yzx + vec3(33.33)));
++	float noise = fract((np.x + np.y) * np.z);
++
++	// Cycle 1: colour from each source's rgb, alpha from its alpha; combined is 0.
++#define SA_ t0
++#define SB_ t1
++#define COMB_ vec4(0.0)
++	vec3 rgb1 = WSUM(pc.color0.ab, noise).rgb * WSUM(pc.color0.c, noise).rgb + WSUM(pc.color0.d, noise).rgb;
++	float a1 = WSUM(pc.alpha0.ab, noise).a * WSUM(pc.alpha0.c, noise).a + WSUM(pc.alpha0.d, noise).a;
++#undef SA_
++#undef SB_
++#undef COMB_
++
++#ifdef CYC2
++	// Cycle 2 reads texel0 and texel1 swapped, as libultraship does, and the first cycle's result wrapped.
++	vec4 comb = vec4(mix(WRAP(rgb1, vec3(-0.51), vec3(1.51)), WRAP(rgb1, vec3(-1.01), vec3(1.01)), pc.misc.w),
++		mix(WRAP(a1, -0.51, 1.51), WRAP(a1, -1.01, 1.01), pc.misc.z));
++#define SA_ t1
++#define SB_ t0
++#define COMB_ comb
++	vec3 rgb2 = WSUM(pc.color1.ab, noise).rgb * WSUM(pc.color1.c, noise).rgb + WSUM(pc.color1.d, noise).rgb;
++	float a2 = WSUM(pc.alpha1.ab, noise).a * WSUM(pc.alpha1.c, noise).a + WSUM(pc.alpha1.d, noise).a;
++	vec4 combined = vec4(rgb2, a2);
++#else
++	vec4 combined = vec4(rgb1, a1);
++#endif
++
++	vec4 texel = clamp(WRAP(combined, vec4(-0.51), vec4(1.51)), 0.0, 1.0);
++	float use_alpha = pc.opts0.x;
++	float alpha0 = mix(1.0, texel.a, use_alpha);
++	vec3 fogged = mix(texel.rgb, mix(texel.rgb, v_fog.rgb, v_fog.a), pc.opts0.y);
++
++	float edge = pc.opts0.z * use_alpha;
++	float edge_kill = edge * step(alpha0, 0.19);
++	float alpha1 = mix(alpha0, 1.0, edge);
++
++	float noisy = floor(clamp(noise + alpha1, 0.0, 1.0));
++	float alpha2 = mix(alpha1, alpha1 * noisy, pc.opts0.w * use_alpha);
++
++	float intensity = (fogged.r + fogged.g + fogged.b) / 3.0;
++	vec3 shaded = mix(fogged, mix(fogged, v_gray.rgb * intensity, v_gray.a), pc.opts1.z);
++
++	float threshold_kill = pc.opts1.x * use_alpha * step(alpha2, 8.0 / 256.0 - 0.0001);
++	float alpha3 = mix(alpha2, 0.0, pc.opts1.y * use_alpha);
++	o_color = vec4(shaded, alpha3);
++#ifdef KILL
++	if (edge_kill + threshold_kill > 0.5)
++		discard;
++#endif
++}
+diff --git a/src/fast/backends/xenos/fast3d.vert b/src/fast/backends/xenos/fast3d.vert
+new file mode 100644
+index 0000000..f7dc338
+--- /dev/null
++++ b/src/fast/backends/xenos/fast3d.vert
+@@ -0,0 +1,56 @@
++#version 450
++// Fast3D vertex shader for the Xenos backend (gfx_xenos.cpp). The interpreter packs each vertex as its shader needs
++// (position, then per texture its coordinates and clamp limits, fog, grayscale, then the combiner inputs); the backend
++// points each input below at its place in that packing, or at the position for one the shader doesn't use, so one
++// vertex shader serves every combiner. xost maps location 0 to POSITION, 1 to COLOR and 2 on to TEXCOORD0 on.
++layout(location = 0) in vec4 a_pos;
++layout(location = 1) in vec4 a_in1;
++layout(location = 2) in vec2 a_uv0;
++layout(location = 3) in vec2 a_uv1;
++layout(location = 4) in float a_clamp_s0;
++layout(location = 5) in float a_clamp_t0;
++layout(location = 6) in float a_clamp_s1;
++layout(location = 7) in float a_clamp_t1;
++layout(location = 8) in vec4 a_fog;
++layout(location = 9) in vec4 a_gray;
++layout(location = 10) in vec4 a_in2;
++layout(location = 11) in vec4 a_in3;
++layout(location = 12) in vec4 a_in4;
++layout(location = 13) in vec4 a_in5;
++layout(location = 14) in vec4 a_in6;
++layout(location = 15) in vec4 a_in7;
++
++layout(location = 0) out vec4 v_uv;     // uv0.xy, uv1.xy
++layout(location = 1) out vec4 v_clamp;  // clamp limits s0, t0, s1, t1
++layout(location = 2) out vec4 v_fog;
++layout(location = 3) out vec4 v_gray;
++layout(location = 4) out vec4 v_in1;
++layout(location = 5) out vec4 v_in2;
++layout(location = 6) out vec4 v_in3;
++layout(location = 7) out vec4 v_in4;
++layout(location = 8) out vec4 v_in5;
++layout(location = 9) out vec4 v_in6;
++layout(location = 10) out vec4 v_in7;
++
++// x: 1 to draw at prim_depth (G_ZS_PRIM), y: that depth, 0 to 1.
++layout(push_constant) uniform Push { vec4 prim; } pc;
++
++void main()
++{
++	vec4 p = a_pos;
++	// Prim depth is one depth for the whole draw: set in clip space, as the pixel shader writing depth would keep
++	// the GPU's hierarchical depth off.
++	p.z = mix(p.z, pc.prim.y * p.w, pc.prim.x);
++	gl_Position = p;
++	v_uv = vec4(a_uv0, a_uv1);
++	v_clamp = vec4(a_clamp_s0, a_clamp_t0, a_clamp_s1, a_clamp_t1);
++	v_fog = a_fog;
++	v_gray = a_gray;
++	v_in1 = a_in1;
++	v_in2 = a_in2;
++	v_in3 = a_in3;
++	v_in4 = a_in4;
++	v_in5 = a_in5;
++	v_in6 = a_in6;
++	v_in7 = a_in7;
++}
+diff --git a/src/fast/backends/xenos/ui.frag b/src/fast/backends/xenos/ui.frag
+new file mode 100644
+index 0000000..05528e9
+--- /dev/null
++++ b/src/fast/backends/xenos/ui.frag
+@@ -0,0 +1,10 @@
++#version 450
++layout(location = 0) in vec2 v_uv;
++layout(location = 1) in vec4 v_color;
++layout(location = 0) out vec4 o_color;
++layout(set = 0, binding = 0) uniform sampler2D u_tex;
++
++void main()
++{
++	o_color = v_color * texture(u_tex, v_uv);
++}
+diff --git a/src/fast/backends/xenos/ui.vert b/src/fast/backends/xenos/ui.vert
+new file mode 100644
+index 0000000..d040528
+--- /dev/null
++++ b/src/fast/backends/xenos/ui.vert
+@@ -0,0 +1,16 @@
++#version 450
++// Textured, coloured 2D quads and triangles for the Xenos backend: Dear ImGui's draw lists, framebuffer copies and
++// restores, and clears. Position in pixels or clip space as xform maps it; depth from push constant depth.x.
++layout(location = 0) in vec2 a_pos;
++layout(location = 1) in vec4 a_color;
++layout(location = 2) in vec2 a_uv;
++layout(location = 0) out vec2 v_uv;
++layout(location = 1) out vec4 v_color;
++layout(push_constant) uniform Push { vec4 xform; vec4 depth; } pc;
++
++void main()
++{
++	gl_Position = vec4(a_pos * pc.xform.xy + pc.xform.zw, pc.depth.x, 1.0);
++	v_uv = a_uv;
++	v_color = a_color;
++}
+diff --git a/src/fast/interpreter.cpp b/src/fast/interpreter.cpp
+index 730b6f2..7ae7f37 100644
+--- a/src/fast/interpreter.cpp
++++ b/src/fast/interpreter.cpp
+@@ -7,7 +7,7 @@
+ #include <stdbool.h>
+ #include <assert.h>
+ #include <stdio.h>
+-#ifndef _WIN32
++#if !defined(_WIN32) && !defined(__XSDK__)
+ #include <dlfcn.h>
+ #endif
+ 

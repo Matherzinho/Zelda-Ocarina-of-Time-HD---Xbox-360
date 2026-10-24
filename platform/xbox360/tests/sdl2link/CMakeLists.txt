@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.25)
+project(sdl2link C CXX)
+add_executable(sdl2link main.c)
+target_link_libraries(sdl2link PRIVATE ${OOT360_SYSROOT}/lib/libSDL2.a ${OOT360_SYSROOT}/lib/libSDL3X.a)
+target_include_directories(sdl2link PRIVATE ${OOT360_SYSROOT}/include)
+xsdk_add_xex(sdl2link NAME "SDL2 link probe")

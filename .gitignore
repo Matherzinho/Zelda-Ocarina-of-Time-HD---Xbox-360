@@ -1,0 +1,39 @@
+# ---- Game data: NEVER commit (see tools/hooks/pre-commit) ----
+*.z64
+*.n64
+*.v64
+*.rom
+*.bin
+*.iso
+*.o2r
+*.otr
+*.bps
+*.ips
+*.xdelta
+*.ups
+*.aps
+*.sav
+*.srm
+*.eep
+*.fla
+*.mpk
+localdata/
+extracted/
+assets_local/
+
+# ---- Build outputs ----
+build/
+build-*/
+*.xex
+*.elf
+*.o
+*.a
+
+# ---- Third-party binaries users sometimes drop in ----
+*.exe
+*.dll
+
+# ---- Misc ----
+__pycache__/
+*.pyc
+*.log

@@ -1,0 +1,230 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index eb3c3875..a156ec50 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -179,13 +179,19 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
+ 
+ # Enable the Gfx debugger in LUS, which fetches its own libgfxd
+ set(GFX_DEBUG_DISASSEMBLER ON)
++if(XSDK)
++    # Xbox 360: no Gfx debugger (libgfxd) and no legacy MPQ (.otr) archives; .o2r only.
++    set(GFX_DEBUG_DISASSEMBLER OFF)
++endif()
+ 
+ # Tell LUS we're using F3DEX_GBI_2 (in a way that doesn't break libgfxd)
+ set(GBI_UCODE F3DEX_GBI_2)
+ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/CMake")
+ 
+ # Enable MPQ and OTR support
+-set(INCLUDE_MPQ_SUPPORT ON)
++if(NOT XSDK)
++    set(INCLUDE_MPQ_SUPPORT ON)
++endif()
+ 
+ ################################################################################
+ # Set CONTROLLERBUTTONS_T
+@@ -280,6 +286,7 @@ function(quiet_dependency_tree dir)
+     endforeach()
+ endfunction()
+ 
++if(NOT XSDK) # Xbox 360: assets are extracted on a PC; torch and the asset tools are host-only
+ add_subdirectory(torch SYSTEM)
+ quiet_dependency_tree(${CMAKE_CURRENT_SOURCE_DIR}/torch)
+ 
+@@ -359,6 +366,8 @@ add_custom_target(GenerateSohOtr ALL DEPENDS ${CMAKE_BINARY_DIR}/soh/soh.o2r)
+ # ExtractAssets produced soh.o2r as well as the rom archives, so keep doing that.
+ add_dependencies(ExtractAssets GenerateSohOtr)
+ 
++endif() # NOT XSDK
++
+ # The asset tools only need torch, so a tools-only configure can skip libultraship and soh
+ # entirely -- that is all CI needs to produce soh.o2r.
+ option(SOH_TOOLS_ONLY "Configure only the asset tools, skipping libultraship and soh" OFF)
+@@ -372,7 +381,9 @@ endif()
+ ################################################################################
+ add_subdirectory(libultraship ${CMAKE_BINARY_DIR}/libultraship SYSTEM)
+ quiet_target(libultraship "${WARNING_OVERRIDE}")
+-target_compile_definitions(libultraship PUBLIC INCLUDE_MPQ_SUPPORT)
++if(NOT XSDK)
++    target_compile_definitions(libultraship PUBLIC INCLUDE_MPQ_SUPPORT)
++endif()
+ add_subdirectory(soh)
+ 
+ set_property(TARGET soh PROPERTY APPIMAGE_DESKTOP_FILE_TERMINAL YES)
+diff --git a/libultraship b/libultraship
+--- a/libultraship
++++ b/libultraship
+@@ -1 +1 @@
+-Subproject commit da6daf1a50a5e46d6641408d52227e31e85e46df
++Subproject commit da6daf1a50a5e46d6641408d52227e31e85e46df-dirty
+diff --git a/soh/CMakeLists.txt b/soh/CMakeLists.txt
+index f356d214..e8b029de 100644
+--- a/soh/CMakeLists.txt
++++ b/soh/CMakeLists.txt
+@@ -167,7 +167,7 @@ endif()
+ # soh/Extractor {{{
+ list(FILTER ship__ EXCLUDE REGEX "soh/Extractor/*")
+ 
+-if(NOT CMAKE_SYSTEM_NAME MATCHES "NintendoSwitch|CafeOS")
++if(NOT CMAKE_SYSTEM_NAME MATCHES "NintendoSwitch|CafeOS" AND NOT XSDK)
+     file(GLOB_RECURSE soh__Extractor CONFIGURE_DEPENDS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
+         "soh/Extractor/*.c"
+         "soh/Extractor/*.cpp"
+@@ -372,7 +372,7 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
+             NOMINMAX
+         )
+     endif()
+-elseif (CMAKE_SYSTEM_NAME STREQUAL "CafeOS")
++elseif (CMAKE_SYSTEM_NAME STREQUAL "CafeOS" OR XSDK)
+     target_compile_definitions(${PROJECT_NAME} PRIVATE
+         "$<$<CONFIG:Debug>:"
+             "_DEBUG;"
+@@ -539,7 +539,7 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
+         target_link_options(${PROJECT_NAME} PRIVATE
+             -pthread
+         )
+-    elseif (CMAKE_SYSTEM_NAME STREQUAL "CafeOS")
++    elseif (CMAKE_SYSTEM_NAME STREQUAL "CafeOS" OR XSDK)
+         target_compile_options(${PROJECT_NAME} PRIVATE
+             -O2
+ 
+@@ -616,8 +616,10 @@ add_custom_command(
+ ################################################################################
+ add_dependencies(${PROJECT_NAME}
+     libultraship
+-    torch
+ )
++if(NOT XSDK)
++    add_dependencies(${PROJECT_NAME} torch)
++endif()
+ 
+ if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
+     find_package(glfw3 REQUIRED)
+@@ -674,6 +676,11 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+         -lglad
+         Threads::Threads
+     )
++elseif(XSDK)
++    set(ADDITIONAL_LIBRARY_DEPENDENCIES
++        "libultraship;"
++        SDL2::SDL2
++    )
+ elseif(CMAKE_SYSTEM_NAME STREQUAL "CafeOS")
+     find_package(SDL2 REQUIRED)
+     set(ADDITIONAL_LIBRARY_DEPENDENCIES
+@@ -753,8 +760,10 @@ INSTALL(FILES $<TARGET_PDB_FILE:soh> DESTINATION debug COMPONENT ship)
+ INSTALL(FILES ${CMAKE_BINARY_DIR}/soh/soh.o2r DESTINATION . COMPONENT ship)
+ endif()
+ 
++if(NOT XSDK)
+ find_program(CURL NAMES curl DOC "Path to the curl program.  Used to download files.")
+ execute_process(COMMAND ${CURL} -sSfL https://raw.githubusercontent.com/mdqinc/SDL_GameControllerDB/master/gamecontrollerdb.txt -o ${CMAKE_BINARY_DIR}/gamecontrollerdb.txt OUTPUT_VARIABLE RESULT)
++endif()
+ 
+ if("${CMAKE_SYSTEM_NAME}" STREQUAL "Darwin")
+ configure_file( ${CMAKE_CURRENT_SOURCE_DIR}/macosx/Info.plist.in ${CMAKE_BINARY_DIR}/macosx/Info.plist @ONLY)
+@@ -802,4 +811,8 @@ wut_create_wuhb(${PROJECT_NAME}
+ 
+ INSTALL(FILES ${CMAKE_CURRENT_BINARY_DIR}/soh.rpx ${CMAKE_CURRENT_BINARY_DIR}/soh.wuhb DESTINATION . COMPONENT ship)
+ 
++elseif(XSDK)
++
++xsdk_add_xex(${PROJECT_NAME} NAME "Ship of Harkinian")
++
+ endif()
+diff --git a/soh/include/functions.h b/soh/include/functions.h
+index 22adf036..740d2030 100644
+--- a/soh/include/functions.h
++++ b/soh/include/functions.h
+@@ -63,7 +63,7 @@ u32 Locale_IsRegionNative(void);
+ void _assert(const char* exp, const char* file, s32 line);
+ #elif defined(__linux__)
+ void __assert(const char* exp, const char* file, s32 line) __THROW;
+-#elif !defined(__APPLE__) && !defined(__SWITCH__) && !defined(__OpenBSD__)
++#elif !defined(__APPLE__) && !defined(__SWITCH__) && !defined(__OpenBSD__) && !defined(__XSDK__)
+ void __assert(const char* exp, const char* file, s32 line);
+ #endif
+ #if defined(__APPLE__) && defined(NDEBUG)
+diff --git a/soh/soh/OTRGlobals.cpp b/soh/soh/OTRGlobals.cpp
+index 67bd1777..aeef39ef 100644
+--- a/soh/soh/OTRGlobals.cpp
++++ b/soh/soh/OTRGlobals.cpp
+@@ -56,7 +56,7 @@
+ #include <fast/Fast3dGui.h>
+ #include <fast/debug/GfxDebugger.h>
+ 
+-#if not defined(__SWITCH__) && not defined(__WIIU__)
++#if not defined(__SWITCH__) && not defined(__WIIU__) && not defined(__XSDK__)
+ #include "Extractor/Extract.h"
+ #endif
+ 
+@@ -408,6 +408,49 @@ static bool RemoveArchiveAcrossAppDirs(const std::string& fileName) {
+     return !std::filesystem::exists(Ship::Context::LocateFileAcrossAppDirs(fileName, appShortName));
+ }
+ 
++#ifdef __XSDK__
++// Xbox 360: the ROM is never extracted on the console. oot.o2r (from the player's own ROM) and soh.o2r are made on
++// a PC with the same Ship of Harkinian version and copied next to the XEX (oot360 docs). This only checks for them.
++void OTRGlobals::RunExtract(int argc, char* argv[]) {
++    auto wnd = std::dynamic_pointer_cast<Fast::Fast3dWindow>(OTRGlobals::Instance->context->GetWindow());
++    auto gui = wnd->GetGui();
++    const OTRVersion vanillaVersion = DetectOTRVersion("oot.o2r", false);
++    const OTRVersion mqVersion = DetectOTRVersion("oot-mq.o2r", true);
++    const bool haveRom =
++        std::filesystem::exists(Ship::Context::LocateFileAcrossAppDirs("oot-mq.o2r", appShortName)) ||
++        std::filesystem::exists(Ship::Context::LocateFileAcrossAppDirs("oot.o2r", appShortName));
++    const std::string version = std::to_string(gBuildVersionMajor) + "." + std::to_string(gBuildVersionMinor) + "." +
++                                std::to_string(gBuildVersionPatch);
++    std::string problem;
++    if (!sohArchiveVersionMatch) {
++        problem = "soh.o2r is missing or from another version.\n\nCopy the soh.o2r of Ship of Harkinian " + version +
++                  "\nnext to the XEX.";
++    } else if (!haveRom) {
++        problem = "No oot.o2r found.\n\nRun Ship of Harkinian " + version +
++                  " on a PC once with your own\nOcarina of Time ROM, then copy oot.o2r next to the XEX.";
++    } else if (VerifyArchiveVersion(vanillaVersion) || VerifyArchiveVersion(mqVersion)) {
++        problem = "oot.o2r was made by another version of Ship of Harkinian.\n\nMake it again with version " +
++                  version + ".";
++    }
++    if (problem.empty()) {
++        return;
++    }
++    SPDLOG_ERROR("Game data: {}", problem);
++    SohGui::RegisterPopup("Game data needed", problem, "OK", "", []() { exit(1); });
++    while (WindowIsRunning()) {
++        wnd->HandleEvents();
++        if (!wnd->IsFrameReady()) {
++            continue;
++        }
++        gui->StartDraw();
++        sohFast3dWindow->StartFrame();
++        sohFast3dWindow->RunGuiOnly();
++        gui->EndDraw();
++        sohFast3dWindow->EndFrame();
++    }
++    exit(1);
++}
++#else
+ void OTRGlobals::RunExtract(int argc, char* argv[]) {
+     bool extractDone = false;
+     ExtractSteps extractStep = ES_PORT_ARCHIVE;
+@@ -821,6 +864,7 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
+     Ship::WiiU::Init(appShortName);
+ #endif
+ }
++#endif // __XSDK__
+ 
+ void InitGfxDebugger() {
+     auto dbg =
+@@ -1506,7 +1550,11 @@ OTRVersion DetectOTRVersion(std::string fileName, bool isMQ) {
+ }
+ 
+ extern "C" void Messagebox_ShowErrorBox(char* title, char* body) {
++#ifdef __XSDK__
++    SPDLOG_ERROR("{}: {}", title, body);
++#else
+     Extractor::ShowErrorBox(title, body);
++#endif
+ }
+ 
+ bool VerifyArchiveVersion(OTRVersion version) {
