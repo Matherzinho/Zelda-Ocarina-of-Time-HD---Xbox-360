@@ -2289,16 +2289,3 @@ index 0000000..d040528
 +	v_uv = a_uv;
 +	v_color = a_color;
 +}
-diff --git a/src/fast/interpreter.cpp b/src/fast/interpreter.cpp
-index 730b6f2..7ae7f37 100644
---- a/src/fast/interpreter.cpp
-+++ b/src/fast/interpreter.cpp
-@@ -7,7 +7,7 @@
- #include <stdbool.h>
- #include <assert.h>
- #include <stdio.h>
--#ifndef _WIN32
-+#if !defined(_WIN32) && !defined(__XSDK__)
- #include <dlfcn.h>
- #endif
- 
