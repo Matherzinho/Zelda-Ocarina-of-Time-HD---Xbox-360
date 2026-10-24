@@ -411,10 +411,10 @@ index 45989b6..48e8ef3 100644
      target_compile_definitions(libultraship PRIVATE
          ENABLE_OPENGL
 diff --git a/src/fast/CMakeLists.txt b/src/fast/CMakeLists.txt
-index 66bf70d..7eaffde 100644
+index 66bf70d..ed7956f 100644
 --- a/src/fast/CMakeLists.txt
 +++ b/src/fast/CMakeLists.txt
-@@ -39,5 +39,58 @@ if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
+@@ -39,5 +39,62 @@ if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
      list(FILTER Source_Files__Graphic EXCLUDE REGEX "graphic/Fast3D/backends/gfx_opengl*")
  endif()
  
@@ -469,6 +469,10 @@ index 66bf70d..7eaffde 100644
 +    add_custom_target(libultraship_xenos_shaders DEPENDS ${XENOS_SHADER_HEADER})
 +    add_dependencies(libultraship libultraship_xenos_shaders)
 +    target_include_directories(libultraship PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
++    # The Fast3D interpreter and the backend are most of a frame's graphics time on the Xenon: -O3 for them.
++    set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/interpreter.cpp
++                                ${CMAKE_CURRENT_SOURCE_DIR}/backends/gfx_xenos.cpp
++                                TARGET_DIRECTORY libultraship PROPERTIES COMPILE_OPTIONS "-O3")
 +endif()
 +
  source_group("graphic" FILES ${Source_Files__Graphic})
@@ -664,10 +668,10 @@ index 2b77a5f..a975689 100644
      }
 diff --git a/src/fast/backends/gfx_xenos.cpp b/src/fast/backends/gfx_xenos.cpp
 new file mode 100644
-index 0000000..a6b88dc
+index 0000000..751b513
 --- /dev/null
 +++ b/src/fast/backends/gfx_xenos.cpp
-@@ -0,0 +1,1706 @@
+@@ -0,0 +1,1721 @@
 +#ifdef ENABLE_XENOS
 +// Fast3D on the Xbox 360's Xenos GPU through xenosworks' xsdk.
 +//
@@ -716,6 +720,11 @@ index 0000000..a6b88dc
 +namespace Fast {
 +
 +std::atomic<bool> gXenosCaptureRequest{ false };
++} // namespace Fast
++extern "C" {
++uint64_t gOot360Prof[8];
++}
++namespace Fast {
 +
 +namespace {
 +
@@ -976,9 +985,10 @@ index 0000000..a6b88dc
 +    } else {
 +        mQuitHeldFrames = 0;
 +    }
-+    // Back and LB capture the next frame for debugging (gfx_xenos.h, CaptureRecord).
-+    const bool captureHeld = (input.gamepad.buttons & (INPUT_GAMEPAD_BACK | INPUT_GAMEPAD_LEFT_SHOULDER)) ==
-+                             (INPUT_GAMEPAD_BACK | INPUT_GAMEPAD_LEFT_SHOULDER);
++    // Both sticks clicked in capture the next frame for debugging (gfx_xenos.h, CaptureRecord); Back alone opens
++    // Ship of Harkinian's menu now.
++    const bool captureHeld = (input.gamepad.buttons & (INPUT_GAMEPAD_LEFT_THUMB | INPUT_GAMEPAD_RIGHT_THUMB)) ==
++                             (INPUT_GAMEPAD_LEFT_THUMB | INPUT_GAMEPAD_RIGHT_THUMB);
 +    if (captureHeld && !mCaptureHeld) {
 +        gXenosCaptureRequest = true;
 +    }
@@ -2214,6 +2224,15 @@ index 0000000..a6b88dc
 +                       (unsigned)mVertexShaders.size(), (unsigned)mPools.size(), (unsigned)mOverflowDraws,
 +                       seconds > 0.0 ? 600.0 / seconds : 0.0, (unsigned)flips, (unsigned)vblanks,
 +                       (unsigned)mWindow->GetTargetFps(), busyMs, (unsigned)(ps.late - mLastStats.late));
++        // The interpreter's own split (interpreter.cpp, OOT360_PROF), ms a frame; nested slots overlap.
++        static const char* const names[7] = { "run", "vertices", "triangles", "draws", "textures", "matrices", "rects" };
++        char line[256];
++        int n = 0;
++        for (int i = 0; i < 7; i++) {
++            n += snprintf(line + n, sizeof line - n, " %s %.2f", names[i], (double)gOot360Prof[i] / 49875.0 / 600.0);
++            gOot360Prof[i] = 0;
++        }
++        xsdk_log_write("xenos: interpreter ms a frame:%s", line);
 +        mLastStats = ps;
 +        mLastLogTime = now;
 +        mWaitUs = 0;
@@ -2615,10 +2634,71 @@ index 0000000..d040528
 +	v_color = a_color;
 +}
 diff --git a/src/fast/interpreter.cpp b/src/fast/interpreter.cpp
-index 730b6f2..cdd4413 100644
+index 730b6f2..9d6bb95 100644
 --- a/src/fast/interpreter.cpp
 +++ b/src/fast/interpreter.cpp
-@@ -1942,7 +1942,10 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
+@@ -134,7 +134,28 @@ void GfxSetInstance(std::shared_ptr<Interpreter> gfx) {
+ // N64 prim_depth is 15-bit (0 near, 0x7FFF far).
+ static constexpr float N64_PRIM_DEPTH_MAX = 32767.0f;
+ 
++#ifdef __XSDK__
++// oot360 profile: time base ticks (49.875 MHz) per slot, logged and reset by the Xenos backend every 600 frames.
++// 0 Run, 1 vertices, 2 triangles, 3 flushes (the backend's draws), 4 texture imports, 5 matrices, 6 rectangles.
++extern "C" uint64_t gOot360Prof[8];
++namespace {
++struct Oot360ProfScope {
++    int slot;
++    uint64_t start;
++    explicit Oot360ProfScope(int s) : slot(s), start(__builtin_ppc_get_timebase()) {
++    }
++    ~Oot360ProfScope() {
++        gOot360Prof[slot] += __builtin_ppc_get_timebase() - start;
++    }
++};
++} // namespace
++#define OOT360_PROF(slot) Oot360ProfScope oot360Prof(slot)
++#else
++#define OOT360_PROF(slot)
++#endif
++
+ void Interpreter::Flush() {
++    OOT360_PROF(3);
+     if (mBufVboLen > 0) {
+         mRapi->SetCurrentPrimDepth((float)mRdp->prim_depth / N64_PRIM_DEPTH_MAX);
+         mRapi->DrawTriangles(mBufVbo, mBufVboLen, mBufVboNumTris);
+@@ -1248,6 +1269,7 @@ void Interpreter::ImportTextureRaw(int tile, bool importReplacement) {
+ }
+ 
+ void Interpreter::ImportTexture(int i, int tile, bool importReplacement) {
++    OOT360_PROF(4);
+     uint8_t fmt = mRdp->texture_tile[tile].fmt;
+     uint8_t siz = mRdp->texture_tile[tile].siz;
+     uint32_t texFlags = mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].tex_flags;
+@@ -1483,6 +1505,7 @@ void Interpreter::CalculateNormalDir(const F3DLight_t* light, float coeffs[3]) {
+ }
+ 
+ void Interpreter::GfxSpMatrix(uint8_t parameters, const int32_t* addr) {
++    OOT360_PROF(5);
+     float matrix[4][4];
+ 
+     if (auto it = mCurMtxReplacements->find((Mtx*)addr); it != mCurMtxReplacements->end()) {
+@@ -1578,6 +1601,7 @@ void Interpreter::AdjustWidthHeightForScale(uint32_t& width, uint32_t& height, u
+ }
+ 
+ void Interpreter::GfxSpVertex(size_t n_vertices, size_t dest_index, const F3DVtx* vertices) {
++    OOT360_PROF(1);
+     for (size_t i = 0; i < n_vertices; i++, dest_index++) {
+         const F3DVtx_t* v = &vertices[i].v;
+         const F3DVtx_tn* vn = &vertices[i].n;
+@@ -1777,6 +1801,7 @@ void Interpreter::GfxSpModifyVertex(uint16_t vtx_idx, uint8_t where, uint32_t va
+ }
+ 
+ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx, bool is_rect) {
++    OOT360_PROF(2);
+     struct LoadedVertex* v1 = &mRsp->loaded_vertices[vtx1_idx];
+     struct LoadedVertex* v2 = &mRsp->loaded_vertices[vtx2_idx];
+     struct LoadedVertex* v3 = &mRsp->loaded_vertices[vtx3_idx];
+@@ -1942,7 +1967,10 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
      ColorCombiner* comb = LookupOrCreateColorCombiner(key);
  
      uint32_t tm = 0;
@@ -2630,7 +2710,7 @@ index 730b6f2..cdd4413 100644
      uint32_t effective_tile[2];
  
      for (int i = 0; i < 2; i++) {
-@@ -2041,6 +2044,12 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
+@@ -2041,6 +2069,12 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
                  tex_height[i] = tex_height2[i];
              }
  
@@ -2643,7 +2723,15 @@ index 730b6f2..cdd4413 100644
              uint32_t tex_width1 = tex_width[i] << (cms & G_TX_MIRROR);
              uint32_t tex_height1 = tex_height[i] << (cmt & G_TX_MIRROR);
  
-@@ -3976,13 +3985,20 @@ bool gfx_othermode_h_handler_f3d(F3DGfx** cmd0) {
+@@ -2821,6 +2855,7 @@ void Interpreter::GfxDpSetFillColor(uint32_t packed_color) {
+ }
+ 
+ void Interpreter::GfxDrawRectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry) {
++    OOT360_PROF(6);
+     uint32_t saved_other_mode_h = mRdp->other_mode_h;
+     uint32_t cycle_type = (mRdp->other_mode_h & (3U << G_MDSFT_CYCLETYPE));
+ 
+@@ -3976,13 +4011,20 @@ bool gfx_othermode_h_handler_f3d(F3DGfx** cmd0) {
  // A resolved address still in the N64 segmented range (<= 0x0FFFFFFF) usually means SegAddr
  // failed to resolve it (segment not set up). Keep it only if it belongs to a loaded module,
  // where it's a real low pointer (e.g. a static TLUT) rather than an unresolved segment addr.
@@ -2665,6 +2753,14 @@ index 730b6f2..cdd4413 100644
      // For Windows, check whether the address belongs to a dll.
      HMODULE module = nullptr;
      return GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+@@ -5145,6 +5187,7 @@ void Interpreter::RunGuiOnly() {
+ }
+ 
+ void Interpreter::Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_replacements) {
++    OOT360_PROF(0);
+     SpReset();
+ 
+     mGetPixelDepthPending.clear();
 diff --git a/src/ship/audio/SDLAudioPlayer.cpp b/src/ship/audio/SDLAudioPlayer.cpp
 index d9f1e44..ea63899 100644
 --- a/src/ship/audio/SDLAudioPlayer.cpp
@@ -2720,11 +2816,101 @@ index d9f1e44..ea63899 100644
      }
  }
  } // namespace Ship
+diff --git a/src/ship/controller/controldeck/ControlDeck.cpp b/src/ship/controller/controldeck/ControlDeck.cpp
+index 977721f..25f2055 100644
+--- a/src/ship/controller/controldeck/ControlDeck.cpp
++++ b/src/ship/controller/controldeck/ControlDeck.cpp
+@@ -7,6 +7,15 @@
+ #include <imgui.h>
+ #include "ship/controller/controldevice/controller/mapping/mouse/WheelHandler.h"
+ 
++// Controller navigation of the menu: on by default on consoles, where there is no keyboard or mouse (oot360).
++#ifndef OOT360_NAV_DEFAULT
++#ifdef __XSDK__
++#define OOT360_NAV_DEFAULT 1
++#else
++#define OOT360_NAV_DEFAULT 0
++#endif
++#endif
++
+ namespace Ship {
+ 
+ ControlDeck::ControlDeck(std::vector<CONTROLLERBUTTONS_T> additionalBitmasks,
+@@ -74,7 +83,7 @@ bool ControlDeck::GamepadGameInputBlocked() {
+     // block controller input when using the controller to navigate imgui menus
+     return AllGameInputBlocked() ||
+            Context::GetRawInstance()->GetWindow()->GetGui()->GetMenuOrMenubarVisible() &&
+-               Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger(CVAR_IMGUI_CONTROLLER_NAV, 0);
++               Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger(CVAR_IMGUI_CONTROLLER_NAV, OOT360_NAV_DEFAULT);
+ }
+ 
+ bool ControlDeck::KeyboardGameInputBlocked() {
 diff --git a/src/ship/window/gui/Gui.cpp b/src/ship/window/gui/Gui.cpp
-index 1f9279b..9056ee8 100644
+index 1f9279b..362c728 100644
 --- a/src/ship/window/gui/Gui.cpp
 +++ b/src/ship/window/gui/Gui.cpp
-@@ -314,22 +314,37 @@ void Gui::CheckSaveCvars() {
+@@ -16,6 +16,15 @@
+ #include "ship/window/gui/resource/GuiTextureFactory.h"
+ #include "ship/window/gui/resource/GuiTexture.h"
+ 
++// Controller navigation of the menu: on by default on consoles, where there is no keyboard or mouse (oot360).
++#ifndef OOT360_NAV_DEFAULT
++#ifdef __XSDK__
++#define OOT360_NAV_DEFAULT 1
++#else
++#define OOT360_NAV_DEFAULT 0
++#endif
++#endif
++
+ namespace Ship {
+ #define TOGGLE_BTN ImGuiKey_F1
+ #define TOGGLE_PAD_BTN ImGuiKey_GamepadBack
+@@ -94,7 +103,7 @@ void Gui::Init() {
+         mImGuiIo->ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+     }
+ 
+-    if (Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger(CVAR_IMGUI_CONTROLLER_NAV, 0) &&
++    if (Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger(CVAR_IMGUI_CONTROLLER_NAV, OOT360_NAV_DEFAULT) &&
+         GetMenuOrMenubarVisible()) {
+         mImGuiIo->ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+     } else {
+@@ -145,7 +154,7 @@ void Gui::BlockGamepadNavigation() {
+ }
+ 
+ void Gui::UnblockGamepadNavigation() {
+-    if (Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger(CVAR_IMGUI_CONTROLLER_NAV, 0) &&
++    if (Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger(CVAR_IMGUI_CONTROLLER_NAV, OOT360_NAV_DEFAULT) &&
+         GetMenuOrMenubarVisible()) {
+         mImGuiIo->ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+     }
+@@ -174,7 +183,7 @@ void Gui::RefreshImGuiGamepads() {
+ }
+ 
+ void Gui::UpdateGamepadNavigation() {
+-    const bool navWanted = Context::GetRawInstance()->GetConsoleVariables()->GetInteger(CVAR_IMGUI_CONTROLLER_NAV, 0) &&
++    const bool navWanted = Context::GetRawInstance()->GetConsoleVariables()->GetInteger(CVAR_IMGUI_CONTROLLER_NAV, OOT360_NAV_DEFAULT) &&
+                            (GetMenuOrMenubarVisible() ||
+                             ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel));
+     if (navWanted) {
+@@ -228,7 +237,7 @@ void Gui::DrawMenu() {
+ 
+     if (ImGui::IsKeyPressed(TOGGLE_BTN, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false) ||
+         (ImGui::IsKeyPressed(TOGGLE_PAD_BTN, false) &&
+-         Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger(CVAR_IMGUI_CONTROLLER_NAV, 0))) {
++         Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger(CVAR_IMGUI_CONTROLLER_NAV, OOT360_NAV_DEFAULT))) {
+         if ((ImGui::IsKeyPressed(ImGuiKey_Escape, false) || ImGui::IsKeyPressed(TOGGLE_PAD_BTN, false)) && GetMenu()) {
+             GetMenu()->ToggleVisibility();
+         } else if ((ImGui::IsKeyPressed(TOGGLE_BTN, false) || ImGui::IsKeyPressed(TOGGLE_PAD_BTN, false)) &&
+@@ -236,7 +245,7 @@ void Gui::DrawMenu() {
+             GetMenuBar()->ToggleVisibility();
+         }
+         Ship::Context::GetRawInstance()->GetWindow()->GetMouseStateManager()->UpdateMouseCapture();
+-        if (Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger(CVAR_IMGUI_CONTROLLER_NAV, 0) &&
++        if (Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger(CVAR_IMGUI_CONTROLLER_NAV, OOT360_NAV_DEFAULT) &&
+             GetMenuOrMenubarVisible()) {
+             mImGuiIo->ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+         } else {
+@@ -314,22 +323,37 @@ void Gui::CheckSaveCvars() {
      }
  }
  

@@ -96,6 +96,15 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
   and Color_RGBA8_u32 layouts); decal depth bias in normalized depth (-2 was the whole range); texture sizes in the
   draw path start at 1 (uninitialised for textures the combiner doesn't read: inf UVs in 78 of 109 draws);
   -ffp-contract=off and the Switch/Wii U bgcheck rounding fix; audio engine trace and per-phase time profile.
+  Result: sound works (music and effects); shadows/decals and transparency fixed; gameplay at 20.0 fps with the game
+  thread ~11.5 ms in game logic and ~17 ms in graphics a 50 ms tick; the file select (60 updates a second) only
+  reaches ~22 fps.
+- **Test 10:** Ship of Harkinian's own menu (all its enhancements, graphics and FPS settings) on Back, with
+  controller navigation on by default on xsdk; frame capture moved to L3+R3. Optional PT-BR: tools/ptbr builds
+  ptbr.o2r from the player's patched ROM (2115 messages from the NTSC table in code, the 14 redrawn font glyphs;
+  font widths are unchanged by the translation), loaded after oot.o2r unless gOot360.PtBr is 0 (Settings >
+  Languages). Interpreter profile slots (run, vertices, triangles, draws, textures, matrices, rectangles) in the log;
+  interpreter.cpp and gfx_xenos.cpp at -O3.
 
 ## Not done yet / known gaps
 - Title screen 2-cycle effect, logo and text; controller input (test 6); 60 fps.
@@ -103,7 +112,8 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
 - Combiner shader is the general one: specialised shaders for the hottest combiners come after measuring.
 - Big-endian loading of `.o2r` resources made by torch on a little-endian PC is untested (Wii U used the older
   OTR pipeline).
-- PT-BR: extraction tool for the v1.8 data and a pt-BR text archive; Redux features as options.
+- PT-BR: dialogue text and font done (tools/ptbr); still English: item/map names, place-name cards, do-action
+  labels and title (textures). Redux features as options.
 - 4:3 option, widescreen FOV, menu defaults for the console.
 
 ## User data (local only, verified 2026-10-24)
