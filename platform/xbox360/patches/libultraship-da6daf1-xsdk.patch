@@ -411,10 +411,10 @@ index 45989b6..48e8ef3 100644
      target_compile_definitions(libultraship PRIVATE
          ENABLE_OPENGL
 diff --git a/src/fast/CMakeLists.txt b/src/fast/CMakeLists.txt
-index 66bf70d..ed7956f 100644
+index 66bf70d..7eaffde 100644
 --- a/src/fast/CMakeLists.txt
 +++ b/src/fast/CMakeLists.txt
-@@ -39,5 +39,62 @@ if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
+@@ -39,5 +39,58 @@ if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
      list(FILTER Source_Files__Graphic EXCLUDE REGEX "graphic/Fast3D/backends/gfx_opengl*")
  endif()
  
@@ -469,10 +469,6 @@ index 66bf70d..ed7956f 100644
 +    add_custom_target(libultraship_xenos_shaders DEPENDS ${XENOS_SHADER_HEADER})
 +    add_dependencies(libultraship libultraship_xenos_shaders)
 +    target_include_directories(libultraship PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
-+    # The Fast3D interpreter and the backend are most of a frame's graphics time on the Xenon: -O3 for them.
-+    set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/interpreter.cpp
-+                                ${CMAKE_CURRENT_SOURCE_DIR}/backends/gfx_xenos.cpp
-+                                TARGET_DIRECTORY libultraship PROPERTIES COMPILE_OPTIONS "-O3")
 +endif()
 +
  source_group("graphic" FILES ${Source_Files__Graphic})

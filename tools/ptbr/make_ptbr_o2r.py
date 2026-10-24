@@ -6,7 +6,11 @@
 ROM is the player's Ocarina of Time USA 1.0 already patched with the PT-BR v1.8 translation (joao13traducoes /
 Patcher64+, the official BPS). The archive holds what Ship of Harkinian reads in place of oot.o2r's files:
 
-  text/nes_message_data_static/nes_message_data_static   every dialogue, sign and item text, in Portuguese
+  override/text/nes_message_data_static/ptbr             every dialogue, sign and item text, in Portuguese; Ship
+                                                          of Harkinian replaces oot.o2r's messages of the same ids
+                                                          with these (z_message_OTR.cpp, OTRMessage_LoadCustom), so
+                                                          PAL-only ones such as 0xFFFC (the file select's ordered
+                                                          font, which the game reads without a null check) stay
   textures/nes_font_static/gMsgChar..Tex                  the 14 glyphs the translation redrew for its accents
                                                           (0x93 is a-tilde, 0x94 c-cedilla, 0x97 e-circumflex...)
 
@@ -117,7 +121,8 @@ def main():
 
     text, count = text_resource(message_table(code), messages)
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("text/nes_message_data_static/nes_message_data_static", text)
+        # Not in place of the whole table: an NTSC table has no 0xFFFC, and the game crashed at the title (test 10).
+        z.writestr("override/text/nes_message_data_static/ptbr", text)
         for glyph, name in REDRAWN.items():
             off = (glyph - FIRST_GLYPH) * GLYPH_BYTES
             z.writestr("textures/nes_font_static/" + name, texture_resource(font[off:off + GLYPH_BYTES]))

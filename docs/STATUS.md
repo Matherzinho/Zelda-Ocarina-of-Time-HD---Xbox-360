@@ -104,7 +104,9 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
   ptbr.o2r from the player's patched ROM (2115 messages from the NTSC table in code, the 14 redrawn font glyphs;
   font widths are unchanged by the translation), loaded after oot.o2r unless gOot360.PtBr is 0 (Settings >
   Languages). Interpreter profile slots (run, vertices, triangles, draws, textures, matrices, rectangles) in the log;
-  interpreter.cpp and gfx_xenos.cpp at -O3.
+  First run crashed at the title: ptbr.o2r replaced the whole message table, and an NTSC table has no 0xFFFC,
+  which the PAL file select font reads without a null check; ptbr.o2r now uses SoH's override folder (by id).
+  Also loaded the archive twice; -O3 tried and dropped until measured.
 
 ## Not done yet / known gaps
 - Title screen 2-cycle effect, logo and text; controller input (test 6); 60 fps.
