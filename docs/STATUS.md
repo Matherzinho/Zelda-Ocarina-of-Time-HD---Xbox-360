@@ -1,7 +1,7 @@
 # oot360: status
 
 Native/homebrew Ocarina of Time for Xbox 360: Ship of Harkinian 9.3.1 (HarbourMasters) ported to xenosworks' xsdk.
-No game data lives in this repository. **Nothing has run on an Xbox 360 yet.**
+No game data lives in this repository. Runs on a real console up to the title screen (test 5).
 
 ## Decision (Phase 0)
 Base: Ship of Harkinian + libultraship with a new Xenos rendering backend on xsdk's own GPU layer. Platform patterns
@@ -66,10 +66,19 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
   locked is what xsdk documents for a stack overflow.
 - **Test 5:** no NotoSansJP on the console (fontJapanese = Montserrat 24); font atlas built at ImGui's new frame
   when not built; every std::thread gets 4 MB of stack (pthread_create wrapped, logged); a heartbeat thread logs the
-  game thread's phase every 2 s (Gui::StartDraw/EndDraw steps, Graph_ProcessGfxCommands). Waiting for its log.
+  game thread's phase every 2 s (Gui::StartDraw/EndDraw steps, Graph_ProcessGfxCommands). Result: **the game
+  runs**: N64 logo, then the title scene (sceneNum 0x51, Hyrule Field with Epona) drawn right in 3D. Faults: the
+  title's 2-cycle flame effect shows as nine copies of the flame with black boxes, the logo and PRESS START are
+  missing; no controller input at all; 161 missed vblanks by frame 600, 976 by 1200 (below 60 fps).
+- **Test 6:** the window backend took every SDL event with SDL_PollEvent, the controller-added events among them, so
+  LUS never opened a pad: it now leaves them to SDLAddRemoveDeviceEventHandler (as gfx_sdl2 does) and logs the
+  joysticks SDL sees. Frame capture (tools/xenoscap): frames 1500 and 3000, and Back+LB, write every draw (state,
+  combiner constants, vertices), the trace, the textures and the picture to game:\oot360_capture_<frame>.bin. The
+  title fault couldn't be found by reading the code (the flame texture path, I4 LoadBlock and the vertex layout check
+  out), so it waits for a capture.
 
 ## Not done yet / known gaps
-- Link and first XEX; first console run (needs the user: console, `oot.o2r`/`soh.o2r` from SoH 9.3.1).
+- Title screen 2-cycle effect, logo and text; controller input (test 6); 60 fps.
 - Depth readback (`GetPixelDepth` answers "far": lens flare occlusion is off); MSAA; texture masks/blends.
 - Combiner shader is the general one: specialised shaders for the hottest combiners come after measuring.
 - Big-endian loading of `.o2r` resources made by torch on a little-endian PC is untested (Wii U used the older

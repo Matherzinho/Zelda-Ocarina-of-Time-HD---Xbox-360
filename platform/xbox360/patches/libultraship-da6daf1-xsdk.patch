@@ -50,10 +50,10 @@ index 7c16ca1..5ff7e5b 100644
  class Fast3dWindow : public Ship::Window {
 diff --git a/include/fast/backends/gfx_xenos.h b/include/fast/backends/gfx_xenos.h
 new file mode 100644
-index 0000000..646965c
+index 0000000..0db24c9
 --- /dev/null
 +++ b/include/fast/backends/gfx_xenos.h
-@@ -0,0 +1,313 @@
+@@ -0,0 +1,328 @@
 +#ifdef ENABLE_XENOS
 +#pragma once
 +
@@ -64,7 +64,9 @@ index 0000000..646965c
 +#include "gfx_window_manager_api.h"
 +#include "../interpreter.h"
 +
++#include <atomic>
 +#include <cstdint>
++#include <cstdio>
 +#include <map>
 +#include <unordered_map>
 +#include <vector>
@@ -79,6 +81,9 @@ index 0000000..646965c
 +struct ImDrawData;
 +
 +namespace Fast {
++
++// Set (by the controller's Back+LB, or the frame counter) to have the renderer capture its next frame.
++extern std::atomic<bool> gXenosCaptureRequest;
 +
 +// Pixel shader variants, one bit each (gfx_xenos_shaders, built from xenos/fast3d.frag).
 +enum XenosPixelVariant : uint32_t {
@@ -196,6 +201,8 @@ index 0000000..646965c
 +    uint32_t mHeight = 720;
 +    bool mOpen = false;
 +    uint32_t mQuitHeldFrames = 0;
++    int mLoggedPads = -1;
++    bool mCaptureHeld = false;
 +};
 +
 +class GfxRenderingAPIXenos final : public GfxRenderingAPI {
@@ -283,12 +290,20 @@ index 0000000..646965c
 +
 +    // The first frames are traced: each step logged, then the GPU waited for, so a hang names the step before it.
 +    bool Tracing() const {
-+        return mFrame < kTraceFrames;
++        return mFrame < kTraceFrames || mCapture != nullptr;
 +    }
 +    void Trace(const char* format, ...) __attribute__((format(printf, 2, 3)));
 +    bool TraceSync(const char* step);
 +    static constexpr uint64_t kTraceFrames = 3;
 +    bool mGpuHung = false;
++
++    // A frame capture (docs: tools/xenoscap): every draw with its constants, vertices and textures, the trace, and
++    // the picture, into game:\oot360_capture_<frame>.bin, for working out drawing faults away from the console.
++    void CaptureRecord(uint32_t type, const void* a, uint32_t aBytes, const void* b = nullptr, uint32_t bBytes = 0);
++    void CaptureTexture(uint32_t id, uint32_t kind);
++    void CaptureFinish();
++    FILE* mCapture = nullptr;
++    std::vector<uint32_t> mCaptureTextures;
 +
 +    XsdkShader* VertexShaderFor(const CCFeatures& cc, uint8_t* numFloats);
 +    void BuildCombinerConstants(const CCFeatures& cc, XenosCombinerConstants& out);
@@ -642,10 +657,10 @@ index 2b77a5f..a975689 100644
      }
 diff --git a/src/fast/backends/gfx_xenos.cpp b/src/fast/backends/gfx_xenos.cpp
 new file mode 100644
-index 0000000..504c569
+index 0000000..f85bbcf
 --- /dev/null
 +++ b/src/fast/backends/gfx_xenos.cpp
-@@ -0,0 +1,1518 @@
+@@ -0,0 +1,1666 @@
 +#ifdef ENABLE_XENOS
 +// Fast3D on the Xbox 360's Xenos GPU through xenosworks' xsdk.
 +//
@@ -690,6 +705,8 @@ index 0000000..504c569
 +extern "C" void Oot360_LogMemory(const char* where);
 +
 +namespace Fast {
++
++std::atomic<bool> gXenosCaptureRequest{ false };
 +
 +namespace {
 +
@@ -918,10 +935,25 @@ index 0000000..504c569
 +
 +void GfxWindowBackendXenos::HandleEvents() {
 +    // SDL (SDL-xenon through sdl2-compat) keeps the controllers; pumping its events notices hot-plugging.
++    // Controller add/remove events are left in the queue: LUS's SDLAddRemoveDeviceEventHandler takes them and opens
++    // the pads (taking them here, as SDL_PollEvent did in test 5, left the game with no controller at all).
 +    SDL_Event event;
-+    while (SDL_PollEvent(&event)) {
++    SDL_PumpEvents();
++    while (SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_FIRSTEVENT, SDL_CONTROLLERDEVICEADDED - 1) > 0) {
 +        if (event.type == SDL_QUIT) {
 +            mIsRunning = false;
++        }
++    }
++    while (SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_CONTROLLERDEVICEREMOVED + 1, SDL_LASTEVENT) > 0) {
++    }
++    if (SDL_NumJoysticks() != mLoggedPads) {
++        mLoggedPads = SDL_NumJoysticks();
++        SPDLOG_INFO("oot360: SDL sees {} joystick(s)", mLoggedPads);
++        for (int i = 0; i < SDL_NumJoysticks(); i++) {
++            char guid[64];
++            SDL_JoystickGetGUIDString(SDL_JoystickGetDeviceGUID(i), guid, sizeof(guid));
++            SPDLOG_INFO("oot360: joystick {} \"{}\" guid {} gamecontroller {}", i, SDL_JoystickNameForIndex(i), guid,
++                        SDL_IsGameController(i) ? "yes" : "no");
 +        }
 +    }
 +    // Back and Start held for a second leaves the title, as the zelda3 port does.
@@ -935,6 +967,13 @@ index 0000000..504c569
 +    } else {
 +        mQuitHeldFrames = 0;
 +    }
++    // Back and LB capture the next frame for debugging (gfx_xenos.h, CaptureRecord).
++    const bool captureHeld = (input.gamepad.buttons & (INPUT_GAMEPAD_BACK | INPUT_GAMEPAD_LEFT_SHOULDER)) ==
++                             (INPUT_GAMEPAD_BACK | INPUT_GAMEPAD_LEFT_SHOULDER);
++    if (captureHeld && !mCaptureHeld) {
++        gXenosCaptureRequest = true;
++    }
++    mCaptureHeld = captureHeld;
 +}
 +
 +bool GfxWindowBackendXenos::IsFrameReady() {
@@ -1368,6 +1407,9 @@ index 0000000..504c569
 +void GfxRenderingAPIXenos::SelectTexture(int tile, uint32_t textureId) {
 +    mCurrentTextureIds[tile] = textureId;
 +    mCurrentTile = tile;
++    if (mCapture) {
++        Trace("select tile %d texture %u", tile, (unsigned)textureId);
++    }
 +}
 +
 +bool GfxRenderingAPIXenos::CreateTextureStorage(XenosTexture& t, uint32_t format, uint32_t width, uint32_t height,
@@ -1408,6 +1450,8 @@ index 0000000..504c569
 +    }
 +    xsdk_texture_upload(&t.texture, 0, rgba32Buf, width * 4);
 +    xsdk_gpu_invalidate(t.texture.address, t.texture.size_bytes);
++    Trace("upload texture %u (tile %d): %ux%u", (unsigned)mCurrentTextureIds[mCurrentTile], mCurrentTile,
++          (unsigned)width, (unsigned)height);
 +}
 +
 +void GfxRenderingAPIXenos::SetSamplerParameters(int tile, bool linear_filter, uint32_t cms, uint32_t cmt) {
@@ -1838,6 +1882,10 @@ index 0000000..504c569
 +    va_start(args, format);
 +    vsnprintf(line, sizeof line, format, args);
 +    va_end(args);
++    if (mCapture) {
++        CaptureRecord(1, line, (uint32_t)strlen(line));
++        return;
++    }
 +    xsdk_log_write("xenos[f%llu]: %s", (unsigned long long)mFrame, line);
 +}
 +
@@ -1968,6 +2016,51 @@ index 0000000..504c569
 +          (unsigned)buf_vbo_num_tris, tex[0] ? tex[0]->width : 0, tex[0] ? tex[0]->height : 0,
 +          tex[1] ? tex[1]->width : 0, tex[1] ? tex[1]->height : 0, depthKey, (int)mUseAlpha, mViewport[0],
 +          mViewport[1], mViewport[2], mViewport[3], mScissor[0], mScissor[1], mScissor[2], mScissor[3], mBoundFb);
++    if (mCapture) {
++        struct {
++            uint32_t index, id0hi, id0lo, id1hi, id1lo, variant, numFloats, numTris, numInputs;
++            uint32_t used[2], texId[2], texW[2], texH[2], linear[2], threePoint[2], addrU[2], addrV[2];
++            int32_t depthKey, useAlpha, decal, fb, viewport[4], scissor[4];
++            uint32_t twoCycle, mayKill, vboFloats;
++        } d = {};
++        d.index = (uint32_t)mDrawsThisFrame;
++        d.id0hi = (uint32_t)(prg->shaderId0 >> 32);
++        d.id0lo = (uint32_t)prg->shaderId0;
++        d.id1hi = (uint32_t)(prg->shaderId1 >> 32);
++        d.id1lo = (uint32_t)prg->shaderId1;
++        d.variant = variant;
++        d.numFloats = prg->numFloats;
++        d.numTris = (uint32_t)buf_vbo_num_tris;
++        d.numInputs = prg->numInputs;
++        for (int t = 0; t < 2; t++) {
++            d.used[t] = prg->usedTextures[t];
++            d.texId[t] = tex[t] ? mCurrentTextureIds[t] : 0xFFFFFFFFu;
++            d.texW[t] = tex[t] ? tex[t]->width : 0;
++            d.texH[t] = tex[t] ? tex[t]->height : 0;
++            d.linear[t] = tex[t] ? tex[t]->linear : 0;
++            d.threePoint[t] = tex[t] ? tex[t]->threePoint : 0;
++            d.addrU[t] = tex[t] ? tex[t]->addressU : 0;
++            d.addrV[t] = tex[t] ? tex[t]->addressV : 0;
++            if (tex[t] && std::find(mCaptureTextures.begin(), mCaptureTextures.end(), mCurrentTextureIds[t]) ==
++                              mCaptureTextures.end()) {
++                mCaptureTextures.push_back(mCurrentTextureIds[t]);
++            }
++        }
++        d.depthKey = depthKey;
++        d.useAlpha = mUseAlpha;
++        d.decal = mCurrentZmodeDecal;
++        d.fb = mBoundFb;
++        memcpy(d.viewport, mViewport, sizeof d.viewport);
++        memcpy(d.scissor, mScissor, sizeof d.scissor);
++        d.twoCycle = prg->twoCycle;
++        d.mayKill = prg->mayKill;
++        // Up to 4096 triangles of vertices a draw.
++        d.vboFloats = (uint32_t)std::min<size_t>(buf_vbo_len, (size_t)prg->numFloats * 3 * 4096);
++        std::vector<uint8_t> rec(sizeof d + sizeof k);
++        memcpy(rec.data(), &d, sizeof d);
++        memcpy(rec.data() + sizeof d, &k, sizeof k);
++        CaptureRecord(2, rec.data(), (uint32_t)rec.size(), buf_vbo, d.vboFloats * 4);
++    }
 +    xsdk_gpu_draw(XSDK_PRIMITIVE_TRIANGLE_LIST, (uint32_t)(3 * buf_vbo_num_tris));
 +    mBoundDirty = true;
 +    mDrawsThisFrame++;
@@ -1980,6 +2073,70 @@ index 0000000..504c569
 +void GfxRenderingAPIXenos::StartFrame() {
 +    mFrameCount++;
 +    mDrawsThisFrame = 0;
++    // Frames 1500 and 3000 (the title screen) capture themselves; Back+LB captures any other.
++    if (mFrame == 1500 || mFrame == 3000) {
++        gXenosCaptureRequest = true;
++    }
++    if (gXenosCaptureRequest.exchange(false) && !mCapture && !mGpuHung) {
++        char path[96];
++        snprintf(path, sizeof path, "game:\\oot360_capture_%llu.bin", (unsigned long long)mFrame);
++        mCapture = fopen(path, "wb");
++        xsdk_log_write("xenos: capturing frame %llu into %s: %s", (unsigned long long)mFrame, path,
++                       mCapture ? "open" : "could not open the file");
++        if (mCapture) {
++            static const char magic[8] = { 'O', 'O', 'T', 'C', 'A', 'P', '0', '1' };
++            fwrite(magic, 1, sizeof magic, mCapture);
++            const uint32_t sizes[3] = { (uint32_t)sizeof(XenosCombinerConstants), (uint32_t)mFrame, 0 };
++            CaptureRecord(0, sizes, sizeof sizes);
++            mCaptureTextures.clear();
++        }
++    }
++}
++
++void GfxRenderingAPIXenos::CaptureRecord(uint32_t type, const void* a, uint32_t aBytes, const void* b,
++                                         uint32_t bBytes) {
++    if (!mCapture) {
++        return;
++    }
++    const uint32_t header[2] = { type, aBytes + bBytes };
++    fwrite(header, sizeof header, 1, mCapture);
++    if (aBytes) {
++        fwrite(a, 1, aBytes, mCapture);
++    }
++    if (bBytes) {
++        fwrite(b, 1, bBytes, mCapture);
++    }
++}
++
++// kind 0: a texture as uploaded (bytes R, G, B, A), 1: a framebuffer's resolve (A8R8G8B8).
++void GfxRenderingAPIXenos::CaptureTexture(uint32_t id, uint32_t kind) {
++    if (id >= mTextures.size()) {
++        return;
++    }
++    const XenosTexture& t = mTextures[id];
++    if (!t.memory || !t.width || !t.height) {
++        return;
++    }
++    std::vector<uint8_t> pixels((size_t)t.width * t.height * 4);
++    xsdk_texture_download_rows(&t.texture, 0, 0, t.height, pixels.data(), t.width * 4);
++    const uint32_t head[4] = { id, t.width, t.height, kind };
++    CaptureRecord(3, head, sizeof head, pixels.data(), (uint32_t)pixels.size());
++}
++
++void GfxRenderingAPIXenos::CaptureFinish() {
++    if (!mCapture) {
++        return;
++    }
++    xsdk_gpu_wait(xsdk_gpu_fence(), kFenceTimeoutMs);
++    for (uint32_t id : mCaptureTextures) {
++        CaptureTexture(id, 0);
++    }
++    if (!mFramebuffers.empty()) {
++        CaptureTexture(mFramebuffers[0].textureId, 1);
++    }
++    fclose(mCapture);
++    mCapture = nullptr;
++    xsdk_log_write("xenos: capture written (%u textures)", (unsigned)mCaptureTextures.size());
 +}
 +
 +void GfxRenderingAPIXenos::EndFrame() {
@@ -1993,6 +2150,11 @@ index 0000000..504c569
 +        BindTarget(0);
 +    }
 +    RestoreIfNeeded();
++    if (mCapture && mBoundFb == 0) {
++        // The picture as drawn, into framebuffer 0's texture, eDRAM kept for the present.
++        mBoundDirty = true;
++        ResolveBound(true);
++    }
 +    uint32_t address = 0;
 +    if (NT_SUCCESS(xsdk_present_begin(&address, kBeginTimeoutMs))) {
 +        Trace("present into 0x%08X", (unsigned)address);
@@ -2019,6 +2181,7 @@ index 0000000..504c569
 +        xsdk_gpu_wait(mFrameFence[mRingIndex], kFenceTimeoutMs);
 +    }
 +    mVertexOffset = 0;
++    CaptureFinish();
 +    GpuReclaim();
 +
 +    if ((mFrame % 600) == 0) {

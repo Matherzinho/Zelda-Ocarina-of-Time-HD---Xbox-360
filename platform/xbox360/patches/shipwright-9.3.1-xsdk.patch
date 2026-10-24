@@ -51,12 +51,6 @@ index eb3c3875..a156ec50 100644
  add_subdirectory(soh)
  
  set_property(TARGET soh PROPERTY APPIMAGE_DESKTOP_FILE_TERMINAL YES)
-diff --git a/libultraship b/libultraship
---- a/libultraship
-+++ b/libultraship
-@@ -1 +1 @@
--Subproject commit da6daf1a50a5e46d6641408d52227e31e85e46df
-+Subproject commit da6daf1a50a5e46d6641408d52227e31e85e46df-dirty
 diff --git a/soh/CMakeLists.txt b/soh/CMakeLists.txt
 index f356d214..54112ab7 100644
 --- a/soh/CMakeLists.txt
