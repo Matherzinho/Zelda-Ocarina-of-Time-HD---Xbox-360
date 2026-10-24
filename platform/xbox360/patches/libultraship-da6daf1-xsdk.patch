@@ -50,10 +50,10 @@ index 7c16ca1..5ff7e5b 100644
  class Fast3dWindow : public Ship::Window {
 diff --git a/include/fast/backends/gfx_xenos.h b/include/fast/backends/gfx_xenos.h
 new file mode 100644
-index 0000000..0db24c9
+index 0000000..9eae1f0
 --- /dev/null
 +++ b/include/fast/backends/gfx_xenos.h
-@@ -0,0 +1,328 @@
+@@ -0,0 +1,335 @@
 +#ifdef ENABLE_XENOS
 +#pragma once
 +
@@ -372,6 +372,13 @@ index 0000000..0db24c9
 +    std::vector<GpuBlock> mPendingFrees;
 +    std::map<uint64_t, uint32_t> mFenceOfFrame;
 +
++    // Frame pacing: each frame shows for 60 / the game's fps vblanks (SoH runs at 20 unless interpolating).
++    void PaceFrame();
++    uint32_t mNextFlipVblank = 0;
++    uint64_t mWaitUs = 0;
++    XsdkPresentStats mLastStats = {};
++    double mLastLogTime = 0.0;
++
 +    float mNoiseScale = 1.0f;
 +    uint32_t mFrameCount = 0;
 +    uint32_t mFontTexture = 0;
@@ -657,10 +664,10 @@ index 2b77a5f..a975689 100644
      }
 diff --git a/src/fast/backends/gfx_xenos.cpp b/src/fast/backends/gfx_xenos.cpp
 new file mode 100644
-index 0000000..f85bbcf
+index 0000000..65acc1e
 --- /dev/null
 +++ b/src/fast/backends/gfx_xenos.cpp
-@@ -0,0 +1,1666 @@
+@@ -0,0 +1,1700 @@
 +#ifdef ENABLE_XENOS
 +// Fast3D on the Xbox 360's Xenos GPU through xenosworks' xsdk.
 +//
@@ -684,6 +691,7 @@ index 0000000..f85bbcf
 +#include <cmath>
 +#include <cstdarg>
 +#include <cstring>
++#include <ctime>
 +
 +#include <SDL2/SDL.h>
 +#include <imgui.h>
@@ -2159,6 +2167,7 @@ index 0000000..f85bbcf
 +    if (NT_SUCCESS(xsdk_present_begin(&address, kBeginTimeoutMs))) {
 +        Trace("present into 0x%08X", (unsigned)address);
 +        xsdk_gpu_resolve(address, mFramebuffers[0].width, mFramebuffers[0].height, 0xFF000000);
++        PaceFrame();
 +        xsdk_present_end();
 +        TraceSync("the present resolve");
 +    } else {
@@ -2185,15 +2194,47 @@ index 0000000..f85bbcf
 +    GpuReclaim();
 +
 +    if ((mFrame % 600) == 0) {
-+        XsdkGpuStats st;
-+        xsdk_gpu_stats(&st);
 +        XsdkPresentStats ps;
 +        xsdk_present_stats(&ps);
-+        xsdk_log_write("xenos: frame %llu draws %llu shaders %u layouts %u pools %u overflows %u missed %u",
++        const double now = mWindow->GetTime();
++        const double seconds = mLastLogTime > 0.0 ? now - mLastLogTime : 0.0;
++        const uint32_t vblanks = ps.vblanks - mLastStats.vblanks;
++        const uint32_t flips = ps.flips - mLastStats.flips;
++        // Busy: the time a frame took on the CPU and GPU, without the pacing wait.
++        const double busyMs = seconds > 0.0 ? (seconds * 1e6 - (double)mWaitUs) / 600.0 / 1000.0 : 0.0;
++        xsdk_log_write("xenos: frame %llu draws %llu shaders %u layouts %u pools %u overflows %u | %.1f fps "
++                       "(%u flips in %u vblanks), target %u fps, busy %.1f ms a frame, late %u",
 +                       (unsigned long long)mFrame, (unsigned long long)mDrawsThisFrame, (unsigned)mShaderPool.size(),
 +                       (unsigned)mVertexShaders.size(), (unsigned)mPools.size(), (unsigned)mOverflowDraws,
-+                       (unsigned)ps.missed);
++                       seconds > 0.0 ? 600.0 / seconds : 0.0, (unsigned)flips, (unsigned)vblanks,
++                       (unsigned)mWindow->GetTargetFps(), busyMs, (unsigned)(ps.late - mLastStats.late));
++        mLastStats = ps;
++        mLastLogTime = now;
++        mWaitUs = 0;
 +    }
++}
++
++void GfxRenderingAPIXenos::PaceFrame() {
++    const uint32_t fps = mWindow->GetTargetFps();
++    // A frame shows from the vblank after xsdk_present_end for interval vblanks; 20 fps is 3, 30 is 2, 60 is 1.
++    uint32_t interval = fps > 0 ? (60 + fps / 2) / fps : 1;
++    interval = std::clamp<uint32_t>(interval, 1, 6);
++    XsdkPresentStats ps;
++    xsdk_present_stats(&ps);
++    if (mNextFlipVblank == 0 || ps.vblanks + 1 > mNextFlipVblank) {
++        // Late (or the first frame): show at the next vblank, as the N64 drops a frame when it can't keep up.
++        mNextFlipVblank = ps.vblanks + 1;
++    }
++    const auto start = std::chrono::steady_clock::now();
++    while (ps.vblanks + 1 < mNextFlipVblank) {
++        struct timespec ts = { 0, 1000000 };
++        nanosleep(&ts, nullptr);
++        xsdk_present_stats(&ps);
++    }
++    mWaitUs += (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
++                                                                              start)
++                   .count();
++    mNextFlipVblank += interval;
 +}
 +
 +void GfxRenderingAPIXenos::FinishRender() {
@@ -2568,10 +2609,23 @@ index 0000000..d040528
 +	v_color = a_color;
 +}
 diff --git a/src/fast/interpreter.cpp b/src/fast/interpreter.cpp
-index 730b6f2..99955d3 100644
+index 730b6f2..e502759 100644
 --- a/src/fast/interpreter.cpp
 +++ b/src/fast/interpreter.cpp
-@@ -3976,13 +3976,20 @@ bool gfx_othermode_h_handler_f3d(F3DGfx** cmd0) {
+@@ -2041,6 +2041,12 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
+                 tex_height[i] = tex_height2[i];
+             }
+ 
++            // A tile whose TMEM slot was never loaded gives 0 here, and the UVs below divide by it: inf, then NaN
++            // in a filter. GPUs sample inf harmlessly enough; Xenos's three-point filter turns it into NaN, which a
++            // weight of 0 doesn't cancel (console test 7 captures).
++            tex_width[i] = std::max<uint32_t>(tex_width[i], 1);
++            tex_height[i] = std::max<uint32_t>(tex_height[i], 1);
++
+             uint32_t tex_width1 = tex_width[i] << (cms & G_TX_MIRROR);
+             uint32_t tex_height1 = tex_height[i] << (cmt & G_TX_MIRROR);
+ 
+@@ -3976,13 +3982,20 @@ bool gfx_othermode_h_handler_f3d(F3DGfx** cmd0) {
  // A resolved address still in the N64 segmented range (<= 0x0FFFFFFF) usually means SegAddr
  // failed to resolve it (segment not set up). Keep it only if it belongs to a loaded module,
  // where it's a real low pointer (e.g. a static TLUT) rather than an unresolved segment addr.
@@ -2593,6 +2647,61 @@ index 730b6f2..99955d3 100644
      // For Windows, check whether the address belongs to a dll.
      HMODULE module = nullptr;
      return GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+diff --git a/src/ship/audio/SDLAudioPlayer.cpp b/src/ship/audio/SDLAudioPlayer.cpp
+index d9f1e44..ea63899 100644
+--- a/src/ship/audio/SDLAudioPlayer.cpp
++++ b/src/ship/audio/SDLAudioPlayer.cpp
+@@ -1,5 +1,7 @@
+ #include "ship/audio/SDLAudioPlayer.h"
+ #include <spdlog/spdlog.h>
++#include <algorithm>
++#include <cstdlib>
+ 
+ namespace Ship {
+ 
+@@ -44,6 +46,11 @@ bool SDLAudioPlayer::DoInit() {
+     }
+ 
+     SPDLOG_INFO("SDL Audio initialized: {} channels, {} Hz", mNumChannels, this->GetSampleRate());
++#ifdef __XSDK__
++    SPDLOG_INFO("oot360: audio driver {}, device {}: {} Hz, {} channels, format 0x{:x}, {} samples",
++                SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "(none)", (unsigned)mDevice, have.freq,
++                (int)have.channels, (unsigned)have.format, (int)have.samples);
++#endif
+ 
+     SDL_PauseAudioDevice(mDevice, 0);
+     return true;
+@@ -54,9 +61,29 @@ int SDLAudioPlayer::Buffered() {
+ }
+ 
+ void SDLAudioPlayer::DoPlay(const uint8_t* buf, size_t len) {
++#ifdef __XSDK__
++    // Every 5 s or so: how full SDL's queue is (stuck at the top means the device doesn't play it) and the loudest
++    // sample the game made (0 means the game makes silence).
++    static uint32_t calls, dropped;
++    static int peak;
++    const int16_t* samples = (const int16_t*)buf;
++    for (size_t i = 0; i < len / 2; i++) {
++        peak = std::max(peak, std::abs((int)samples[i]));
++    }
++    if (++calls % 300 == 0) {
++        SPDLOG_INFO("oot360: audio {} plays, queue {} frames, {} dropped, loudest {}, device status {}", calls,
++                    Buffered(), dropped, peak, (int)SDL_GetAudioDeviceStatus(mDevice));
++        peak = 0;
++    }
++    if (Buffered() >= 6000) {
++        dropped++;
++    }
++#endif
+     if (Buffered() < 6000) {
+         // Don't fill the audio buffer too much in case this happens
+-        SDL_QueueAudio(mDevice, buf, len);
++        if (SDL_QueueAudio(mDevice, buf, len) != 0) {
++            SPDLOG_ERROR("SDL_QueueAudio: {}", SDL_GetError());
++        }
+     }
+ }
+ } // namespace Ship
 diff --git a/src/ship/window/gui/Gui.cpp b/src/ship/window/gui/Gui.cpp
 index 1f9279b..9056ee8 100644
 --- a/src/ship/window/gui/Gui.cpp

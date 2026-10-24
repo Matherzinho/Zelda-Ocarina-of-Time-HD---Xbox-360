@@ -83,6 +83,13 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
 - **Test 7:** IsValidResolvedAddress on xsdk asks whether the address lies in the span malloc has handed out
   (tracked by the allocation wrappers). Display lists from archives (OTR hash path) never went through it, which is
   why the 3D scene was right and runtime-built 2D (title, menus, text) was not.
+  Result: title, file select and gameplay work (Kokiri Forest, Deku Tree). No sound; some objects overlap or turn
+  transparent at moments; the game runs slightly fast (1500 frames in ~65 s: ~23 fps for SoH's 20).
+- **Test 8:** frames paced by vblank count to the game's fps (SoH's default 20: 3 vblanks a frame); the log now gives
+  real fps and the CPU+GPU time a frame. Threads spread over the cores: xsdk starts threads on their creator's
+  hardware thread, so the game, audio mixing and SDL's audio feeder all shared hardware thread 0; now 2, 4 and 5.
+  Audio diagnostics (driver, queue fill, loudest sample). Interpreter: tiles whose TMEM slot is empty gave tex size 0
+  and inf UVs (seen in the test 7 captures), which Xenos's three-point filter turns into NaN; sizes floored at 1.
 
 ## Not done yet / known gaps
 - Title screen 2-cycle effect, logo and text; controller input (test 6); 60 fps.
