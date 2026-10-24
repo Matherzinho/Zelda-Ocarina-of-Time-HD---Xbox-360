@@ -54,7 +54,12 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
   389 MB free (image 96 MB). `Fast::Interpreter::Init` took **256 MB** in one malloc: mTexUploadBuffer is
   GetMaxTextureSize()^2 * 4 and the backend said 8192. OTRExtScanner then ran out (bad_alloc). Other big ones: three
   5.2 MB font loads (ImGui), two 2.6 MB spdlog thread pools.
-- **Test 3:** GetMaxTextureSize 2048 (16 MB buffer). Waiting for its log.
+- **Test 3:** GetMaxTextureSize 2048 (16 MB buffer). InitOTR, Heaps_Alloc complete (235 MB free after); ImGui's
+  first frame starts (imgui.ini lookup), then the log stops and the console freezes: the GPU hung on the first
+  frame and the CPU blocked on the full ring.
+- **Test 4:** ImGui index lists copied per command onto 4-byte boundaries (an odd IdxOffset gave 2-byte aligned
+  index addresses); the first 3 frames traced, a fence wait after every GPU step, and on a hang the backend stops GPU
+  work and logs "GPU HUNG after <step>". Waiting for its log.
 
 ## Not done yet / known gaps
 - Link and first XEX; first console run (needs the user: console, `oot.o2r`/`soh.o2r` from SoH 9.3.1).

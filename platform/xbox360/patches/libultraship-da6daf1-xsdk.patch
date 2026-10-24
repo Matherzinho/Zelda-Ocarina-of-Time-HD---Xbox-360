@@ -50,10 +50,10 @@ index 7c16ca1..5ff7e5b 100644
  class Fast3dWindow : public Ship::Window {
 diff --git a/include/fast/backends/gfx_xenos.h b/include/fast/backends/gfx_xenos.h
 new file mode 100644
-index 0000000..e3d63c2
+index 0000000..894e3fe
 --- /dev/null
 +++ b/include/fast/backends/gfx_xenos.h
-@@ -0,0 +1,303 @@
+@@ -0,0 +1,312 @@
 +#ifdef ENABLE_XENOS
 +#pragma once
 +
@@ -279,6 +279,15 @@ index 0000000..e3d63c2
 +                          float x1, float y1);
 +
 +    volatile uint32_t* VertexSpace(uint32_t bytes, uint32_t* address);
++
++    // The first frames are traced: each step logged, then the GPU waited for, so a hang names the step before it.
++    bool Tracing() const {
++        return mFrame < kTraceFrames;
++    }
++    void Trace(const char* format, ...) __attribute__((format(printf, 2, 3)));
++    bool TraceSync(const char* step);
++    static constexpr uint64_t kTraceFrames = 3;
++    bool mGpuHung = false;
 +
 +    XsdkShader* VertexShaderFor(const CCFeatures& cc, uint8_t* numFloats);
 +    void BuildCombinerConstants(const CCFeatures& cc, XenosCombinerConstants& out);
@@ -619,10 +628,10 @@ index 2b77a5f..a975689 100644
      }
 diff --git a/src/fast/backends/gfx_xenos.cpp b/src/fast/backends/gfx_xenos.cpp
 new file mode 100644
-index 0000000..5ec5889
+index 0000000..19da702
 --- /dev/null
 +++ b/src/fast/backends/gfx_xenos.cpp
-@@ -0,0 +1,1435 @@
+@@ -0,0 +1,1504 @@
 +#ifdef ENABLE_XENOS
 +// Fast3D on the Xbox 360's Xenos GPU through xenosworks' xsdk.
 +//
@@ -644,6 +653,7 @@ index 0000000..5ec5889
 +#include <algorithm>
 +#include <chrono>
 +#include <cmath>
++#include <cstdarg>
 +#include <cstring>
 +
 +#include <SDL2/SDL.h>
@@ -1523,9 +1533,12 @@ index 0000000..5ec5889
 +        if (t.memory) {
 +            // Keep eDRAM as it is when the framebuffer stays bound; clear it when leaving.
 +            xsdk_gpu_set_resolve_clears(!keepBound, !keepBound);
++            Trace("resolve fb %d into texture %ux%u (keep %d)", mBoundFb, (unsigned)t.width, (unsigned)t.height,
++                  (int)keepBound);
 +            xsdk_gpu_resolve_texture(&t.texture, 0xFF000000);
 +            xsdk_gpu_set_resolve_clears(true, true);
 +            fb.textureValid = true;
++            TraceSync("a framebuffer resolve");
 +        }
 +        mBoundDirty = false;
 +    }
@@ -1544,6 +1557,7 @@ index 0000000..5ec5889
 +    }
 +    ResolveBound(false);
 +    XenosFramebuffer& fb = mFramebuffers[fbId];
++    Trace("bind fb %d %ux%u (restore %d)", fbId, (unsigned)fb.width, (unsigned)fb.height, (int)fb.textureValid);
 +    xsdk_gpu_set_target(fb.width, fb.height);
 +    ResetDrawState();
 +    mBoundFb = fbId;
@@ -1582,9 +1596,11 @@ index 0000000..5ec5889
 +    xsdk_gpu_set_scissor(0, 0, fb.width, fb.height);
 +    xsdk_gpu_set_texture(UI_FRAG_SAMPLER_0_0, &tex.texture, &mBlitSampler);
 +    xsdk_gpu_set_vertices(0, address, sizeof quad);
++    Trace("textured rect %ux%u into fb %d", (unsigned)tex.width, (unsigned)tex.height, mBoundFb);
 +    xsdk_gpu_draw(XSDK_PRIMITIVE_TRIANGLE_STRIP, 4);
 +    ResetDrawState();
 +    mBoundDirty = true;
++    TraceSync("a textured rect");
 +}
 +
 +void GfxRenderingAPIXenos::RestoreIfNeeded() {
@@ -1611,6 +1627,9 @@ index 0000000..5ec5889
 +}
 +
 +void GfxRenderingAPIXenos::ClearFramebuffer(bool color, bool depth) {
++    if (mGpuHung) {
++        return;
++    }
 +    if (mBoundFb < 0) {
 +        BindTarget(mCurrentFb);
 +    }
@@ -1668,9 +1687,12 @@ index 0000000..5ec5889
 +    xsdk_gpu_set_scissor(0, 0, fb.width, fb.height);
 +    xsdk_gpu_set_texture(UI_FRAG_SAMPLER_0_0, &any.texture, &mBlitSampler);
 +    xsdk_gpu_set_vertices(0, address, sizeof quad);
++    Trace("clear fb %d %ux%u color %d depth %d", mBoundFb, (unsigned)fb.width, (unsigned)fb.height, (int)color,
++          (int)depth);
 +    xsdk_gpu_draw(XSDK_PRIMITIVE_TRIANGLE_STRIP, 4);
 +    ResetDrawState();
 +    mBoundDirty = true;
++    TraceSync("a clear");
 +}
 +
 +void GfxRenderingAPIXenos::CopyFramebuffer(int fbDstId, int fbSrcId, int srcX0, int srcY0, int srcX1, int srcY1,
@@ -1793,7 +1815,39 @@ index 0000000..5ec5889
 +    return mem;
 +}
 +
++void GfxRenderingAPIXenos::Trace(const char* format, ...) {
++    if (!Tracing()) {
++        return;
++    }
++    char line[256];
++    va_list args;
++    va_start(args, format);
++    vsnprintf(line, sizeof line, format, args);
++    va_end(args);
++    xsdk_log_write("xenos[f%llu]: %s", (unsigned long long)mFrame, line);
++}
++
++bool GfxRenderingAPIXenos::TraceSync(const char* step) {
++    if (mGpuHung) {
++        return false;
++    }
++    if (!Tracing()) {
++        return true;
++    }
++    const NTSTATUS s = xsdk_gpu_wait(xsdk_gpu_fence(), 1000);
++    if (!NT_SUCCESS(s)) {
++        mGpuHung = true;
++        xsdk_log_write("xenos[f%llu]: GPU HUNG after %s (0x%08X); no more GPU work this run, Back+Start quits",
++                       (unsigned long long)mFrame, step, (unsigned)s);
++        return false;
++    }
++    return true;
++}
++
 +void GfxRenderingAPIXenos::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris) {
++    if (mGpuHung) {
++        return;
++    }
 +    ShaderProgram* prg = mCurrentShader;
 +    if (!prg || !prg->vertex || buf_vbo_num_tris == 0) {
 +        return;
@@ -1893,9 +1947,17 @@ index 0000000..5ec5889
 +    WriteWords(mem, buf_vbo, bytes);
 +    xsdk_gpu_invalidate(address, bytes);
 +    xsdk_gpu_set_vertices(0, address, bytes);
++    Trace("draw %llu: shader %08llx:%08llx variant %u floats %u tris %u tex %ux%u %ux%u depth %d alpha %d "
++          "viewport %d,%d %dx%d scissor %d,%d %dx%d fb %d",
++          (unsigned long long)mDrawsThisFrame, (unsigned long long)(prg->shaderId0 & 0xFFFFFFFF),
++          (unsigned long long)(prg->shaderId1 & 0xFFFFFFFF), (unsigned)variant, (unsigned)prg->numFloats,
++          (unsigned)buf_vbo_num_tris, tex[0] ? tex[0]->width : 0, tex[0] ? tex[0]->height : 0,
++          tex[1] ? tex[1]->width : 0, tex[1] ? tex[1]->height : 0, depthKey, (int)mUseAlpha, mViewport[0],
++          mViewport[1], mViewport[2], mViewport[3], mScissor[0], mScissor[1], mScissor[2], mScissor[3], mBoundFb);
 +    xsdk_gpu_draw(XSDK_PRIMITIVE_TRIANGLE_LIST, (uint32_t)(3 * buf_vbo_num_tris));
 +    mBoundDirty = true;
 +    mDrawsThisFrame++;
++    TraceSync("a Fast3D draw");
 +}
 +
 +// ---------------------------------------------------------------------------------------------------------------
@@ -1907,6 +1969,11 @@ index 0000000..5ec5889
 +}
 +
 +void GfxRenderingAPIXenos::EndFrame() {
++    Trace("end frame: %llu draws", (unsigned long long)mDrawsThisFrame);
++    if (mGpuHung) {
++        mFrame++;
++        return;
++    }
 +    // The screen into the front buffer.
 +    if (mBoundFb != 0) {
 +        BindTarget(0);
@@ -1914,8 +1981,10 @@ index 0000000..5ec5889
 +    RestoreIfNeeded();
 +    uint32_t address = 0;
 +    if (NT_SUCCESS(xsdk_present_begin(&address, kBeginTimeoutMs))) {
++        Trace("present into 0x%08X", (unsigned)address);
 +        xsdk_gpu_resolve(address, mFramebuffers[0].width, mFramebuffers[0].height, 0xFF000000);
 +        xsdk_present_end();
++        TraceSync("the present resolve");
 +    } else {
 +        xsdk_log_write("xenos: no front buffer came free");
 +        xsdk_gpu_resolve(xsdk_present_buffer_address(0), mFramebuffers[0].width, mFramebuffers[0].height,
@@ -1978,6 +2047,9 @@ index 0000000..5ec5889
 +}
 +
 +void GfxRenderingAPIXenos::ImGuiRenderDrawData(ImDrawData* data) {
++    if (mGpuHung) {
++        return;
++    }
 +    if (!data || data->CmdListsCount == 0 || data->DisplaySize.x <= 0 || data->DisplaySize.y <= 0) {
 +        return;
 +    }
@@ -2003,24 +2075,13 @@ index 0000000..5ec5889
 +    for (int n = 0; n < data->CmdListsCount; n++) {
 +        const ImDrawList* list = data->CmdLists[n];
 +        const uint32_t vbytes = list->VtxBuffer.Size * sizeof(ImDrawVert);
-+        const uint32_t ibytes = (list->IdxBuffer.Size * sizeof(ImDrawIdx) + 3) & ~3u;
-+        uint32_t vaddr, iaddr;
++        uint32_t vaddr;
 +        volatile uint32_t* vmem = VertexSpace(vbytes, &vaddr);
-+        volatile uint32_t* imem = VertexSpace(ibytes, &iaddr);
-+        if (!vmem || !imem) {
++        if (!vmem) {
 +            break;
 +        }
 +        WriteWords(vmem, list->VtxBuffer.Data, vbytes);
-+        if (list->IdxBuffer.Size & 1) {
-+            // An odd count of 16-bit indices: the last word's second half is padding.
-+            std::vector<ImDrawIdx> padded(list->IdxBuffer.Data, list->IdxBuffer.Data + list->IdxBuffer.Size);
-+            padded.push_back(0);
-+            WriteWords(imem, padded.data(), ibytes);
-+        } else {
-+            WriteWords(imem, list->IdxBuffer.Data, ibytes);
-+        }
 +        xsdk_gpu_invalidate(vaddr, vbytes);
-+        xsdk_gpu_invalidate(iaddr, ibytes);
 +
 +        for (const ImDrawCmd& cmd : list->CmdBuffer) {
 +            if (cmd.UserCallback) {
@@ -2044,11 +2105,28 @@ index 0000000..5ec5889
 +                continue;
 +            }
 +            ApplySampler(t);
++            // Each command's indices in a list of their own, starting on 4 bytes as Xenos needs (xsdk
++            // docs/PITFALLS.md): an ImDrawCmd's IdxOffset can be odd. Padded to whole words.
++            const uint32_t ibytes = (cmd.ElemCount * sizeof(ImDrawIdx) + 3) & ~3u;
++            uint32_t iaddr;
++            volatile uint32_t* imem = VertexSpace(ibytes, &iaddr);
++            if (!imem) {
++                break;
++            }
++            std::vector<ImDrawIdx> idx(list->IdxBuffer.Data + cmd.IdxOffset,
++                                       list->IdxBuffer.Data + cmd.IdxOffset + cmd.ElemCount);
++            idx.resize(ibytes / sizeof(ImDrawIdx), 0);
++            WriteWords(imem, idx.data(), ibytes);
++            xsdk_gpu_invalidate(iaddr, ibytes);
 +            xsdk_gpu_set_texture(UI_FRAG_SAMPLER_0_0, &t.texture, &t.sampler);
 +            xsdk_gpu_set_vertices(0, vaddr + cmd.VtxOffset * sizeof(ImDrawVert),
 +                                  vbytes - cmd.VtxOffset * sizeof(ImDrawVert));
-+            xsdk_gpu_draw_indexed(XSDK_PRIMITIVE_TRIANGLE_LIST, iaddr + cmd.IdxOffset * sizeof(ImDrawIdx),
-+                                  cmd.ElemCount, sizeof(ImDrawIdx) == 4);
++            Trace("imgui: %u indices, texture %u (%ux%u), scissor %u,%u %ux%u", (unsigned)cmd.ElemCount, (unsigned)id,
++                  (unsigned)t.width, (unsigned)t.height, (unsigned)x, (unsigned)y, (unsigned)w, (unsigned)h);
++            xsdk_gpu_draw_indexed(XSDK_PRIMITIVE_TRIANGLE_LIST, iaddr, cmd.ElemCount, sizeof(ImDrawIdx) == 4);
++            if (!TraceSync("an ImGui draw")) {
++                return;
++            }
 +        }
 +    }
 +    ResetDrawState();
