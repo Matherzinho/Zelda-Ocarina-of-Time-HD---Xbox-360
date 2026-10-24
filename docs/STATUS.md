@@ -41,7 +41,16 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
   newlib dtoa): Xenia results are unreliable there, the console decides.
 - Excluded on the console: ROM extractor/torch, networking (SDL_net, CrowdControl, Sail, Anchor), ImGui's shell
   functions. Added: Ogg/Vorbis/Opus/opusfile for custom audio.
-- Test 1 delivered to the user (E:\oot360-dev\teste1). **Not yet run on a console.**
+- Test 1 delivered to the user (E:\oot360-dev\teste1).
+
+## Console runs
+- **Test 1 (2026-10-24, user's RGH console, Aurora, Hdd1 ports\teste1):** the XEX starts; display opened 1280x720
+  (scaled to the 1920x1080 output), Xenos renderer ready, soh.o2r and oot.o2r read from game:, SDL3 audio up
+  (2 ch, 32 kHz), "Starting Ship of Harkinian 9.3.1". During InitOTR, after DebugConsole_Init, newlib's heap could
+  not commit more pages (sbrk 0xC0000017) and std::bad_alloc ended the title. No frame was drawn (screen showed
+  eDRAM garbage). Missing gamecontrollerdb.txt and cvars.cfg are expected.
+- **Test 2:** same build with allocation tracing (`soh/platform/xbox360/MemTrace.c`, malloc/calloc/realloc/memalign
+  wrapped, 2 MB and up logged with callers) and memory checkpoints through InitOTR. Waiting for its log.
 
 ## Not done yet / known gaps
 - Link and first XEX; first console run (needs the user: console, `oot.o2r`/`soh.o2r` from SoH 9.3.1).
