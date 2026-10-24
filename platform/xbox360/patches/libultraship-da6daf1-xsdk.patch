@@ -619,10 +619,10 @@ index 2b77a5f..a975689 100644
      }
 diff --git a/src/fast/backends/gfx_xenos.cpp b/src/fast/backends/gfx_xenos.cpp
 new file mode 100644
-index 0000000..279dac0
+index 0000000..5ec5889
 --- /dev/null
 +++ b/src/fast/backends/gfx_xenos.cpp
-@@ -0,0 +1,1432 @@
+@@ -0,0 +1,1435 @@
 +#ifdef ENABLE_XENOS
 +// Fast3D on the Xbox 360's Xenos GPU through xenosworks' xsdk.
 +//
@@ -978,7 +978,10 @@ index 0000000..279dac0
 +}
 +
 +int GfxRenderingAPIXenos::GetMaxTextureSize() {
-+    return 8192;
++    // Xenos takes 8192, but the interpreter keeps a decode buffer of this size squared, 4 bytes a texel
++    // (interpreter.cpp, mTexUploadBuffer): 8192 made it 256 MB of the console's 512 (console test 2). N64 textures
++    // are tiny; 2048 keeps the buffer at 16 MB and leaves room for HD texture packs of up to 2048.
++    return 2048;
 +}
 +
 +GfxClipParameters GfxRenderingAPIXenos::GetClipParameters() {

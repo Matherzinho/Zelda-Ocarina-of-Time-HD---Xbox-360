@@ -50,7 +50,11 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
   not commit more pages (sbrk 0xC0000017) and std::bad_alloc ended the title. No frame was drawn (screen showed
   eDRAM garbage). Missing gamecontrollerdb.txt and cvars.cfg are expected.
 - **Test 2:** same build with allocation tracing (`soh/platform/xbox360/MemTrace.c`, malloc/calloc/realloc/memalign
-  wrapped, 2 MB and up logged with callers) and memory checkpoints through InitOTR. Waiting for its log.
+  wrapped, 2 MB and up logged with callers) and memory checkpoints through InitOTR. Result: at start the title had
+  389 MB free (image 96 MB). `Fast::Interpreter::Init` took **256 MB** in one malloc: mTexUploadBuffer is
+  GetMaxTextureSize()^2 * 4 and the backend said 8192. OTRExtScanner then ran out (bad_alloc). Other big ones: three
+  5.2 MB font loads (ImGui), two 2.6 MB spdlog thread pools.
+- **Test 3:** GetMaxTextureSize 2048 (16 MB buffer). Waiting for its log.
 
 ## Not done yet / known gaps
 - Link and first XEX; first console run (needs the user: console, `oot.o2r`/`soh.o2r` from SoH 9.3.1).
