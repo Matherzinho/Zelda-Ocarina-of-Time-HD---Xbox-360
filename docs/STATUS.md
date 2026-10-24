@@ -90,6 +90,12 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
   hardware thread, so the game, audio mixing and SDL's audio feeder all shared hardware thread 0; now 2, 4 and 5.
   Audio diagnostics (driver, queue fill, loudest sample). Interpreter: tiles whose TMEM slot is empty gave tex size 0
   and inf UVs (seen in the test 7 captures), which Xenos's three-point filter turns into NaN; sizes floored at 1.
+  Result: speed right (20.0 fps, 1800 vblanks per 600 frames), busy 17-33 ms a frame; audio output plays but the
+  game makes silence (loudest sample 0); decals over Link's feet and through walls; transparent/black objects.
+- **Test 9:** IS_BIGENDIAN for every translation unit (the game's C code had little-endian AudioCmd, command macros
+  and Color_RGBA8_u32 layouts); decal depth bias in normalized depth (-2 was the whole range); texture sizes in the
+  draw path start at 1 (uninitialised for textures the combiner doesn't read: inf UVs in 78 of 109 draws);
+  -ffp-contract=off and the Switch/Wii U bgcheck rounding fix; audio engine trace and per-phase time profile.
 
 ## Not done yet / known gaps
 - Title screen 2-cycle effect, logo and text; controller input (test 6); 60 fps.

@@ -485,15 +485,17 @@ index ae098993..4ffaeca5 100644
      if (CVarGetInteger(CVAR_SETTING("Menu.SidebarSearch"), 0)) {
 diff --git a/soh/soh/platform/xbox360/AudioTrace.c b/soh/soh/platform/xbox360/AudioTrace.c
 new file mode 100644
-index 00000000..a2a8d852
+index 00000000..60178a3c
 --- /dev/null
 +++ b/soh/soh/platform/xbox360/AudioTrace.c
-@@ -0,0 +1,34 @@
+@@ -0,0 +1,36 @@
 +// Xbox 360 audio diagnostics: what the game's audio engine is doing, logged now and then from the audio thread
 +// (OTRGlobals.cpp, OTRAudio_Thread), to tell a silent engine (no sequence, no notes, volume 0) from a silent output.
 +#ifdef __XSDK__
 +#include "z64.h"
 +#include <xsdk/log.h>
++
++extern AudioContext gAudioContext;
 +
 +float AudioSettings_GetMasterVolume(void);
 +
