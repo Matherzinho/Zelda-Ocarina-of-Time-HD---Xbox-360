@@ -76,6 +76,13 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
   combiner constants, vertices), the trace, the textures and the picture to game:\oot360_capture_<frame>.bin. The
   title fault couldn't be found by reading the code (the flame texture path, I4 LoadBlock and the vertex layout check
   out), so it waits for a capture.
+  Result: the controller works (SDL sees "Xbox 360 Controller" as a game controller; the file select was reached).
+  The captures showed the title's nine effect draws all sampling gCircleGlowLTex: G_SETTIMG had dropped every
+  texture set by pointer, as LUS's IsValidResolvedAddress takes addresses at or below 0x0FFFFFFF for N64 segment
+  addresses unless dladdr knows them, and xsdk's heap (NtAllocateVirtualMemory) is that low; the dlfcn stub said no.
+- **Test 7:** IsValidResolvedAddress on xsdk asks whether the address lies in the span malloc has handed out
+  (tracked by the allocation wrappers). Display lists from archives (OTR hash path) never went through it, which is
+  why the 3D scene was right and runtime-built 2D (title, menus, text) was not.
 
 ## Not done yet / known gaps
 - Title screen 2-cycle effect, logo and text; controller input (test 6); 60 fps.

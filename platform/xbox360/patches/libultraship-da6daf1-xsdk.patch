@@ -2567,6 +2567,32 @@ index 0000000..d040528
 +	v_uv = a_uv;
 +	v_color = a_color;
 +}
+diff --git a/src/fast/interpreter.cpp b/src/fast/interpreter.cpp
+index 730b6f2..99955d3 100644
+--- a/src/fast/interpreter.cpp
++++ b/src/fast/interpreter.cpp
+@@ -3976,13 +3976,20 @@ bool gfx_othermode_h_handler_f3d(F3DGfx** cmd0) {
+ // A resolved address still in the N64 segmented range (<= 0x0FFFFFFF) usually means SegAddr
+ // failed to resolve it (segment not set up). Keep it only if it belongs to a loaded module,
+ // where it's a real low pointer (e.g. a static TLUT) rather than an unresolved segment addr.
++#ifdef __XSDK__
++extern "C" int Oot360_IsHeapAddress(uintptr_t address);
++#endif
+ static bool IsValidResolvedAddress(uintptr_t addr) {
+     if (addr > 0x0FFFFFFF) {
+         return true;
+     }
+ 
+     // Still in the N64 segmented range, but might be a false positive (a real low pointer).
+-#ifdef _WIN32
++#if defined(__XSDK__)
++    // xsdk's heap sits low in the address space (NtAllocateVirtualMemory), so the game's resources do too; there is no
++    // dladdr, whose stub said no to all of them and dropped every texture set by pointer (console test 6).
++    return Oot360_IsHeapAddress(addr) != 0;
++#elif defined(_WIN32)
+     // For Windows, check whether the address belongs to a dll.
+     HMODULE module = nullptr;
+     return GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
 diff --git a/src/ship/window/gui/Gui.cpp b/src/ship/window/gui/Gui.cpp
 index 1f9279b..9056ee8 100644
 --- a/src/ship/window/gui/Gui.cpp

@@ -446,10 +446,10 @@ index ae098993..4ffaeca5 100644
      if (CVarGetInteger(CVAR_SETTING("Menu.SidebarSearch"), 0)) {
 diff --git a/soh/soh/platform/xbox360/MemTrace.c b/soh/soh/platform/xbox360/MemTrace.c
 new file mode 100644
-index 00000000..9912e300
+index 00000000..cc0e0c2b
 --- /dev/null
 +++ b/soh/soh/platform/xbox360/MemTrace.c
-@@ -0,0 +1,140 @@
+@@ -0,0 +1,165 @@
 +#ifdef __XSDK__
 +// Memory diagnostics for the Xbox 360 build: the link wraps malloc, calloc, realloc and memalign
 +// (soh/CMakeLists.txt, -Wl,--wrap=...) and this logs every allocation of 2 MB or more, and every failure, with the
@@ -499,12 +499,34 @@ index 00000000..9912e300
 +    }
 +}
 +
++// The heap's span as malloc has handed it out, so pointers into it can be told from N64 segment addresses
++// (Oot360_IsHeapAddress, used by the Fast3D interpreter in place of dladdr). Races only widen it late.
++static volatile uintptr_t sHeapLow = UINTPTR_MAX;
++static volatile uintptr_t sHeapHigh = 0;
++
++static inline void Span(void* p, size_t size) {
++    if (p) {
++        const uintptr_t a = (uintptr_t)p;
++        if (a < sHeapLow) {
++            sHeapLow = a;
++        }
++        if (a + size > sHeapHigh) {
++            sHeapHigh = a + size;
++        }
++    }
++}
++
++int Oot360_IsHeapAddress(uintptr_t address) {
++    return address >= sHeapLow && address < sHeapHigh;
++}
++
 +// PowerPC frames keep a back chain, so the callers a few frames up can be read.
 +#define CALLERS __builtin_return_address(0), __builtin_return_address(1), __builtin_return_address(2), \
 +                __builtin_return_address(3)
 +
 +void* __wrap_malloc(size_t size) {
 +    void* p = __real_malloc(size);
++    Span(p, size);
 +    if (size >= OOT360_BIG_ALLOCATION || !p) {
 +        Note("malloc", size, p, CALLERS);
 +    }
@@ -513,6 +535,7 @@ index 00000000..9912e300
 +
 +void* __wrap_calloc(size_t count, size_t size) {
 +    void* p = __real_calloc(count, size);
++    Span(p, count * size);
 +    if (count * size >= OOT360_BIG_ALLOCATION || !p) {
 +        Note("calloc", count * size, p, CALLERS);
 +    }
@@ -521,6 +544,7 @@ index 00000000..9912e300
 +
 +void* __wrap_realloc(void* ptr, size_t size) {
 +    void* p = __real_realloc(ptr, size);
++    Span(p, size);
 +    if (size >= OOT360_BIG_ALLOCATION || (!p && size)) {
 +        Note("realloc", size, p, CALLERS);
 +    }
@@ -529,6 +553,7 @@ index 00000000..9912e300
 +
 +void* __wrap_memalign(size_t align, size_t size) {
 +    void* p = __real_memalign(align, size);
++    Span(p, size);
 +    if (size >= OOT360_BIG_ALLOCATION || !p) {
 +        Note("memalign", size, p, CALLERS);
 +    }
