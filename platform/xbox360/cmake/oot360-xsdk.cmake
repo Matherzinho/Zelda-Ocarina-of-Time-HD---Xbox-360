@@ -17,3 +17,7 @@ list(APPEND CMAKE_C_STANDARD_INCLUDE_DIRECTORIES "${OOT360_COMPAT_INCLUDE}")
 list(APPEND CMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES "${OOT360_COMPAT_INCLUDE}")
 string(APPEND CMAKE_C_FLAGS_INIT " -include ${OOT360_COMPAT_INCLUDE}/oot360_xsdk_prelude.h")
 string(APPEND CMAKE_CXX_FLAGS_INIT " -include ${OOT360_COMPAT_INCLUDE}/oot360_xsdk_prelude.h")
+# No fused multiply-add: GCC contracts a * b + c into fmadd on PowerPC by default, which rounds differently from the
+# N64 and the PC builds; OoT's collision and physics (z_bgcheck.c among others) are sensitive to it.
+string(APPEND CMAKE_C_FLAGS_INIT " -ffp-contract=off")
+string(APPEND CMAKE_CXX_FLAGS_INIT " -ffp-contract=off")

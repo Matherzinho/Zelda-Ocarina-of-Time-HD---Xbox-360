@@ -664,10 +664,10 @@ index 2b77a5f..a975689 100644
      }
 diff --git a/src/fast/backends/gfx_xenos.cpp b/src/fast/backends/gfx_xenos.cpp
 new file mode 100644
-index 0000000..65acc1e
+index 0000000..a6b88dc
 --- /dev/null
 +++ b/src/fast/backends/gfx_xenos.cpp
-@@ -0,0 +1,1700 @@
+@@ -0,0 +1,1706 @@
 +#ifdef ENABLE_XENOS
 +// Fast3D on the Xbox 360's Xenos GPU through xenosworks' xsdk.
 +//
@@ -711,6 +711,7 @@ index 0000000..65acc1e
 +#include "fast/Fast3dWindow.h"
 +
 +extern "C" void Oot360_LogMemory(const char* where);
++extern "C" void Oot360_Phase(const char* phase);
 +
 +namespace Fast {
 +
@@ -1194,9 +1195,12 @@ index 0000000..65acc1e
 +                              XSDK_WRITE_ALL, false };
 +    xsdk_gpu_blend_state(&mBlendOff, &off);
 +    xsdk_gpu_blend_state(&mBlendAlpha, &alpha);
-+    // libultraship's OpenGL backend: glPolygonOffset(-2, -2) for decals (its default Z-fighting mode).
++    // Decals as libultraship's OpenGL backend (glPolygonOffset(-2, -2)). Xenos's offset is in normalized depth, as
++    // Direct3D 9's DEPTHBIAS (xenia: poly_offset_front_offset), not GL's resolvable steps: -2 there pulled every
++    // decal (paths, Link's shadow) in front of everything, over Link's feet and through walls (console test 8).
++    // Two steps of the 24-bit depth buffer it is.
 +    const XsdkRaster normal = { XSDK_CULL_NONE, false, 0.0f, 0.0f, XSDK_FILL_SOLID };
-+    const XsdkRaster decal = { XSDK_CULL_NONE, false, -2.0f, -2.0f, XSDK_FILL_SOLID };
++    const XsdkRaster decal = { XSDK_CULL_NONE, false, -2.0f / 16777216.0f, -2.0f, XSDK_FILL_SOLID };
 +    xsdk_gpu_raster_state(&mRasterNormal, &normal);
 +    xsdk_gpu_raster_state(&mRasterDecal, &decal);
 +    const XsdkSampler blit = { .mag_filter = XSDK_FILTER_LINEAR,
@@ -2167,8 +2171,10 @@ index 0000000..65acc1e
 +    if (NT_SUCCESS(xsdk_present_begin(&address, kBeginTimeoutMs))) {
 +        Trace("present into 0x%08X", (unsigned)address);
 +        xsdk_gpu_resolve(address, mFramebuffers[0].width, mFramebuffers[0].height, 0xFF000000);
++        Oot360_Phase("xenos: pacing wait");
 +        PaceFrame();
 +        xsdk_present_end();
++        Oot360_Phase("xenos: after present");
 +        TraceSync("the present resolve");
 +    } else {
 +        xsdk_log_write("xenos: no front buffer came free");
@@ -2609,10 +2615,22 @@ index 0000000..d040528
 +	v_color = a_color;
 +}
 diff --git a/src/fast/interpreter.cpp b/src/fast/interpreter.cpp
-index 730b6f2..e502759 100644
+index 730b6f2..cdd4413 100644
 --- a/src/fast/interpreter.cpp
 +++ b/src/fast/interpreter.cpp
-@@ -2041,6 +2041,12 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
+@@ -1942,7 +1942,10 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
+     ColorCombiner* comb = LookupOrCreateColorCombiner(key);
+ 
+     uint32_t tm = 0;
+-    uint32_t tex_width[2], tex_height[2], tex_width2[2], tex_height2[2];
++    // Set for the textures the combiner reads; the backend's shader may still take UVs for another (its usedTextures
++    // come from gfx_cc_get_features), so start them at 1 rather than uninitialised: 0 there made inf UVs, and NaN in
++    // Xenos's three-point filter, which a weight of 0 doesn't cancel (console tests 7 and 8).
++    uint32_t tex_width[2] = { 1, 1 }, tex_height[2] = { 1, 1 }, tex_width2[2] = { 1, 1 }, tex_height2[2] = { 1, 1 };
+     uint32_t effective_tile[2];
+ 
+     for (int i = 0; i < 2; i++) {
+@@ -2041,6 +2044,12 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
                  tex_height[i] = tex_height2[i];
              }
  
@@ -2625,7 +2643,7 @@ index 730b6f2..e502759 100644
              uint32_t tex_width1 = tex_width[i] << (cms & G_TX_MIRROR);
              uint32_t tex_height1 = tex_height[i] << (cmt & G_TX_MIRROR);
  
-@@ -3976,13 +3982,20 @@ bool gfx_othermode_h_handler_f3d(F3DGfx** cmd0) {
+@@ -3976,13 +3985,20 @@ bool gfx_othermode_h_handler_f3d(F3DGfx** cmd0) {
  // A resolved address still in the N64 segmented range (<= 0x0FFFFFFF) usually means SegAddr
  // failed to resolve it (segment not set up). Keep it only if it belongs to a loaded module,
  // where it's a real low pointer (e.g. a static TLUT) rather than an unresolved segment addr.
