@@ -44,6 +44,10 @@ clone nih-at/libzip v1.11.4 "$DEPS_SRC/libzip"
 clone leethomason/tinyxml2 10.0.0 "$DEPS_SRC/tinyxml2"
 clone gabime/spdlog v1.16.0 "$DEPS_SRC/spdlog"
 clone nlohmann/json v3.12.0 "$DEPS_SRC/json"
+clone xiph/ogg v1.3.5 "$DEPS_SRC/ogg"
+clone xiph/vorbis v1.3.7 "$DEPS_SRC/vorbis"
+clone xiph/opus v1.5.2 "$DEPS_SRC/opus"
+clone xiph/opusfile v0.12 "$DEPS_SRC/opusfile"
 if [ ! -d "$SDL2COMPAT_SRC/.git" ]; then
 	git clone -q https://github.com/libsdl-org/sdl2-compat "$SDL2COMPAT_SRC"
 	git -C "$SDL2COMPAT_SRC" checkout -q d8198c2
@@ -56,7 +60,7 @@ if [ ! -f "$DEPS_SRC/stb/stb_image.h" ]; then
 fi
 
 step "dependencies for powerpc-xsdk-elf"
-if [ ! -f "$OOT360_SYSROOT/lib/libzip.a" ]; then
+if [ ! -f "$OOT360_SYSROOT/lib/libopusfile.a" ]; then
 	"$HERE/deps/build-deps.sh"
 fi
 if [ ! -f "$OOT360_SYSROOT/lib/libSDL2.a" ]; then

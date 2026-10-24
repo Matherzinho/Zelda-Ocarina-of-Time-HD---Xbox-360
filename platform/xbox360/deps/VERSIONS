@@ -4,3 +4,7 @@ tinyxml2  https://github.com/leethomason/tinyxml2 10.0.0   (zlib)
 json      https://github.com/nlohmann/json        v3.12.0  (MIT)
 spdlog    https://github.com/gabime/spdlog        v1.16.0  (MIT)
 sdl2-compat https://github.com/libsdl-org/sdl2-compat d8198c2 (zlib) +patch
+ogg       https://github.com/xiph/ogg             v1.3.5   (BSD-3)
+vorbis    https://github.com/xiph/vorbis          v1.3.7   (BSD-3)
+opus      https://github.com/xiph/opus            v1.5.2   (BSD-3)
+opusfile  https://github.com/xiph/opusfile        v0.12    (BSD-3, built without HTTP)

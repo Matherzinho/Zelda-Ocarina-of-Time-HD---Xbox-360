@@ -58,7 +58,7 @@ diff --git a/libultraship b/libultraship
 -Subproject commit da6daf1a50a5e46d6641408d52227e31e85e46df
 +Subproject commit da6daf1a50a5e46d6641408d52227e31e85e46df-dirty
 diff --git a/soh/CMakeLists.txt b/soh/CMakeLists.txt
-index f356d214..77a26606 100644
+index f356d214..9a9241b4 100644
 --- a/soh/CMakeLists.txt
 +++ b/soh/CMakeLists.txt
 @@ -166,8 +166,13 @@ endif()
@@ -106,7 +106,7 @@ index f356d214..77a26606 100644
  
  if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
      find_package(glfw3 REQUIRED)
-@@ -674,6 +681,11 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+@@ -674,6 +681,17 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
          -lglad
          Threads::Threads
      )
@@ -114,11 +114,17 @@ index f356d214..77a26606 100644
 +    set(ADDITIONAL_LIBRARY_DEPENDENCIES
 +        "libultraship;"
 +        SDL2::SDL2
++        ${OOT360_SYSROOT}/lib/libopusfile.a
++        ${OOT360_SYSROOT}/lib/libopus.a
++        ${OOT360_SYSROOT}/lib/libvorbisfile.a
++        ${OOT360_SYSROOT}/lib/libvorbis.a
++        ${OOT360_SYSROOT}/lib/libogg.a
 +    )
++    target_include_directories(${PROJECT_NAME} SYSTEM PRIVATE ${OOT360_SYSROOT}/include ${OOT360_SYSROOT}/include/opus)
  elseif(CMAKE_SYSTEM_NAME STREQUAL "CafeOS")
      find_package(SDL2 REQUIRED)
      set(ADDITIONAL_LIBRARY_DEPENDENCIES
-@@ -753,8 +765,10 @@ INSTALL(FILES $<TARGET_PDB_FILE:soh> DESTINATION debug COMPONENT ship)
+@@ -753,8 +771,10 @@ INSTALL(FILES $<TARGET_PDB_FILE:soh> DESTINATION debug COMPONENT ship)
  INSTALL(FILES ${CMAKE_BINARY_DIR}/soh/soh.o2r DESTINATION . COMPONENT ship)
  endif()
  
@@ -129,7 +135,7 @@ index f356d214..77a26606 100644
  
  if("${CMAKE_SYSTEM_NAME}" STREQUAL "Darwin")
  configure_file( ${CMAKE_CURRENT_SOURCE_DIR}/macosx/Info.plist.in ${CMAKE_BINARY_DIR}/macosx/Info.plist @ONLY)
-@@ -802,4 +816,8 @@ wut_create_wuhb(${PROJECT_NAME}
+@@ -802,4 +822,8 @@ wut_create_wuhb(${PROJECT_NAME}
  
  INSTALL(FILES ${CMAKE_CURRENT_BINARY_DIR}/soh.rpx ${CMAKE_CURRENT_BINARY_DIR}/soh.wuhb DESTINATION . COMPONENT ship)
  
