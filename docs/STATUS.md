@@ -59,7 +59,14 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
   frame and the CPU blocked on the full ring.
 - **Test 4:** ImGui index lists copied per command onto 4-byte boundaries (an odd IdxOffset gave 2-byte aligned
   index addresses); the first 3 frames traced, a fence wait after every GPU step, and on a hang the backend stops GPU
-  work and logs "GPU HUNG after <step>". Waiting for its log.
+  work and logs "GPU HUNG after <step>". Result: same stop right after the imgui.ini lookup, and no trace line at
+  all: the hang is on the CPU before the first draw, inside ImGui's first frame (Gui::StartDraw). The backend had
+  built ImGui's font atlas at init, before SoH added its fonts, among them NotoSansJP at 24 px with the Japanese
+  ranges (thousands of glyphs). xsdk's fault handler logs ordinary faults; a log that just stops with the console
+  locked is what xsdk documents for a stack overflow.
+- **Test 5:** no NotoSansJP on the console (fontJapanese = Montserrat 24); font atlas built at ImGui's new frame
+  when not built; every std::thread gets 4 MB of stack (pthread_create wrapped, logged); a heartbeat thread logs the
+  game thread's phase every 2 s (Gui::StartDraw/EndDraw steps, Graph_ProcessGfxCommands). Waiting for its log.
 
 ## Not done yet / known gaps
 - Link and first XEX; first console run (needs the user: console, `oot.o2r`/`soh.o2r` from SoH 9.3.1).

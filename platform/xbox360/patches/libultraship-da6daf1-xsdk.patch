@@ -50,10 +50,10 @@ index 7c16ca1..5ff7e5b 100644
  class Fast3dWindow : public Ship::Window {
 diff --git a/include/fast/backends/gfx_xenos.h b/include/fast/backends/gfx_xenos.h
 new file mode 100644
-index 0000000..894e3fe
+index 0000000..646965c
 --- /dev/null
 +++ b/include/fast/backends/gfx_xenos.h
-@@ -0,0 +1,312 @@
+@@ -0,0 +1,313 @@
 +#ifdef ENABLE_XENOS
 +#pragma once
 +
@@ -250,6 +250,7 @@ index 0000000..894e3fe
 +
 +    // Dear ImGui on Xenos (Fast3dGui calls these for WindowBackend::FAST3D_XENOS).
 +    void ImGuiInit();
++    void ImGuiNewFrame();
 +    void ImGuiShutdown();
 +    void ImGuiRenderDrawData(ImDrawData* data);
 +
@@ -451,7 +452,7 @@ index 66bf70d..7eaffde 100644
  source_group("graphic" FILES ${Source_Files__Graphic})
  target_sources(libultraship PRIVATE ${Source_Files__Graphic})
 diff --git a/src/fast/Fast3dGui.cpp b/src/fast/Fast3dGui.cpp
-index 237a502..a18aeff 100644
+index 237a502..03f8fe3 100644
 --- a/src/fast/Fast3dGui.cpp
 +++ b/src/fast/Fast3dGui.cpp
 @@ -29,6 +29,56 @@
@@ -539,7 +540,20 @@ index 237a502..a18aeff 100644
  #endif
          default:
              break;
-@@ -222,6 +286,25 @@ void Fast3dGui::ImGuiBackendNewFrame() {
+@@ -196,6 +260,12 @@ void Fast3dGui::ImGuiBackendShutdown() {
+ }
+ 
+ void Fast3dGui::ImGuiBackendNewFrame() {
++#ifdef ENABLE_XENOS
++    if (mImpl.Backend == WindowBackend::FAST3D_XENOS) {
++        static_cast<GfxRenderingAPIXenos*>(mInterpreter.lock()->GetCurrentRenderingAPI())->ImGuiNewFrame();
++        return;
++    }
++#endif
+     switch (mImpl.Backend) {
+ #ifdef ENABLE_OPENGL
+         case WindowBackend::FAST3D_SDL_OPENGL:
+@@ -222,6 +292,25 @@ void Fast3dGui::ImGuiBackendNewFrame() {
  }
  
  void Fast3dGui::ImGuiWMNewFrame() {
@@ -565,7 +579,7 @@ index 237a502..a18aeff 100644
      switch (mImpl.Backend) {
          case WindowBackend::FAST3D_SDL_OPENGL:
          case WindowBackend::FAST3D_SDL_METAL:
-@@ -248,6 +331,12 @@ void Fast3dGui::RefreshImGuiGamepads() {
+@@ -248,6 +337,12 @@ void Fast3dGui::RefreshImGuiGamepads() {
  }
  
  void Fast3dGui::ImGuiRenderDrawData(ImDrawData* data) {
@@ -628,10 +642,10 @@ index 2b77a5f..a975689 100644
      }
 diff --git a/src/fast/backends/gfx_xenos.cpp b/src/fast/backends/gfx_xenos.cpp
 new file mode 100644
-index 0000000..19da702
+index 0000000..504c569
 --- /dev/null
 +++ b/src/fast/backends/gfx_xenos.cpp
-@@ -0,0 +1,1504 @@
+@@ -0,0 +1,1518 @@
 +#ifdef ENABLE_XENOS
 +// Fast3D on the Xbox 360's Xenos GPU through xenosworks' xsdk.
 +//
@@ -2029,6 +2043,19 @@ index 0000000..19da702
 +    ImGuiIO& io = ImGui::GetIO();
 +    io.BackendRendererName = "xenos";
 +    io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
++    // The font texture is made at the first new frame, once the game has added its fonts (ImGuiNewFrame).
++}
++
++void GfxRenderingAPIXenos::ImGuiNewFrame() {
++    ImGuiIO& io = ImGui::GetIO();
++    if (mFontTexture && io.Fonts->IsBuilt()) {
++        return;
++    }
++    if (mFontTexture) {
++        DeleteTexture(mFontTexture);
++        mFontTexture = 0;
++    }
++    xsdk_log_write("xenos: building the ImGui font atlas (%d fonts)", io.Fonts->Fonts.Size);
 +    unsigned char* pixels = nullptr;
 +    int width = 0, height = 0;
 +    io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
@@ -2041,6 +2068,7 @@ index 0000000..19da702
 +    f.threePoint = false;
 +    f.samplerDirty = true;
 +    io.Fonts->SetTexID((ImTextureID)(uintptr_t)mFontTexture);
++    xsdk_log_write("xenos: ImGui font atlas %dx%d", width, height);
 +}
 +
 +void GfxRenderingAPIXenos::ImGuiShutdown() {
@@ -2376,3 +2404,45 @@ index 0000000..d040528
 +	v_uv = a_uv;
 +	v_color = a_color;
 +}
+diff --git a/src/ship/window/gui/Gui.cpp b/src/ship/window/gui/Gui.cpp
+index 1f9279b..9056ee8 100644
+--- a/src/ship/window/gui/Gui.cpp
++++ b/src/ship/window/gui/Gui.cpp
+@@ -314,22 +314,37 @@ void Gui::CheckSaveCvars() {
+     }
+ }
+ 
++#ifdef __XSDK__
++extern "C" void Oot360_Phase(const char* phase);
++#define OOT360_PHASE(p) Oot360_Phase(p)
++#else
++#define OOT360_PHASE(p)
++#endif
++
+ void Gui::StartDraw() {
++    OOT360_PHASE("gui start frame");
+     // Initialize the frame.
+     StartFrame();
++    OOT360_PHASE("gui draw menu");
+     // Draw the gui menus
+     DrawMenu();
++    OOT360_PHASE("gui game viewport");
+     // Calculate the available space the game can render to
+     CalculateGameViewport();
++    OOT360_PHASE("game graphics");
+ }
+ 
+ void Gui::EndDraw() {
++    OOT360_PHASE("gui draw game");
+     // Draw the game framebuffer into ImGui
+     DrawGame();
++    OOT360_PHASE("gui end frame");
+     // End the frame
+     EndFrame();
++    OOT360_PHASE("gui floating windows");
+     // Draw the ImGui floating windows.
+     DrawFloatingWindows();
++    OOT360_PHASE("gui save cvars");
+     // Check if the CVars need to be saved, and do it if so.
+     CheckSaveCvars();
+ }
