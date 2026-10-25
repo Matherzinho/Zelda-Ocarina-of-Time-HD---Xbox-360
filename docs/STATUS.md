@@ -180,6 +180,13 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
   8.7 ms of it with the transform, TRI2 5.5); near 60 with Internal Resolution lowered, so the GPU limits too.
 - **Test 17:** (built, not yet run) uploaded textures of 64 texels a side and more get a full mip chain (box filter
   on the CPU, point mip filter); the log counts resource-cache misses and how often gResourceGeneration moved.
+  Result (user, 2026-10-25): textures looked worse (HD HUD and text minified onto blurrier levels), no faster. Log:
+  ~55,000 lookup misses and 600-700 generation changes each 600 frames: a missing file asked for every frame wrote
+  NotFound over NotFound, which bumped the generation and emptied every per-thread cache once a frame.
+- **Test 18:** (built, not yet run) no mips; the generation moves only when an entry's resource appears, changes or
+  goes (and when an archive is added); the per-thread caches keep misses too. GfxSpVertex sums lighting in float with
+  the normal converted once (int/float conversions are load-hit-store stalls on Xenon). The log shows how long the
+  CPU waited for GPU command space (xsdk_gpu_stats).
 
 ## Not done yet / known gaps
 - Title screen 2-cycle effect, logo and text; controller input (test 6); 60 fps.
