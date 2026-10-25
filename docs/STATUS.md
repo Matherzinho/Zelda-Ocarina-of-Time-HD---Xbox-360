@@ -144,6 +144,13 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
   between two GPU clock writes; any wait for the GPU inside the frame releases it early and drops the sample. For the
   1080p decision (the user chose to measure first): xsdk shows only a 1280x720 front buffer, which the console's
   scaler takes to its 1920x1080 output, and 1920x1080 colour and depth (16.6 MB) need tiled passes past eDRAM's 10 MB.
+  Result (user, 2026-10-24): the pause map draws; the GPU alone took 10-15 ms a frame at 720p (17.7 at most), so a
+  1080p frame (2.25 times the pixels, in bands) won't hold 60 fps; the user dropped native 1080p. Internal Resolution
+  above 100% stopped at xsdk's eDRAM assert (gpu_draw.c:348). The slingshot and Link's hand were cut in first
+  person: other backends clamp depth instead of clipping at the near plane. Three-point filtering was on.
+- **Test 14:** (built, not yet run) depth clamp in fast3d.vert (z held to 0..w where w > 0); Internal Resolution held
+  to 100% and MSAA to 1 on xsdk (menu and saved settings), Fullscreen hidden; three-point filtering 26 instructions
+  cheaper for two textures (148 -> 122; linear 86); GPU timing only with gOot360.GpuTiming.
 
 ## Not done yet / known gaps
 - Title screen 2-cycle effect, logo and text; controller input (test 6); 60 fps.

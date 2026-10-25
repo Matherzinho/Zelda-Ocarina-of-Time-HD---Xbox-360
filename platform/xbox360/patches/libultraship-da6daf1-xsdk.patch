@@ -738,10 +738,10 @@ index 2b77a5f..d4dea73 100644
      }
 diff --git a/src/fast/backends/gfx_xenos.cpp b/src/fast/backends/gfx_xenos.cpp
 new file mode 100644
-index 0000000..78a717b
+index 0000000..5b1920f
 --- /dev/null
 +++ b/src/fast/backends/gfx_xenos.cpp
-@@ -0,0 +1,1873 @@
+@@ -0,0 +1,1876 @@
 +#ifdef ENABLE_XENOS
 +// Fast3D on the Xbox 360's Xenos GPU through xenosworks' xsdk.
 +//
@@ -781,6 +781,7 @@ index 0000000..78a717b
 +#include "fast/interpreter.h"
 +#include "libultraship/libultra/gbi.h"
 +#include "ship/Context.h"
++#include "ship/config/ConsoleVariable.h"
 +#include "fast/Fast3dGui.h"
 +#include "fast/Fast3dWindow.h"
 +
@@ -2268,7 +2269,9 @@ index 0000000..78a717b
 +void GfxRenderingAPIXenos::StartFrame() {
 +    mFrameCount++;
 +    mDrawsThisFrame = 0;
-+    if (mTimingMem && !mTimingPending && !mTimingGateClosed && !Tracing() && mFrame % kTimingEvery == kTimingEvery / 2) {
++    // Off unless gOot360.GpuTiming is set: holding the GPU back costs the timed frame its overlap with the CPU.
++    if (mTimingMem && !mTimingPending && !mTimingGateClosed && !Tracing() && mFrame % kTimingEvery == kTimingEvery / 2 &&
++        Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger("gOot360.GpuTiming", 0)) {
 +        mTimingTag++;
 +        for (int i = 4; i < 12; i++) {
 +            mTimingMem[i] = 0;
@@ -2617,10 +2620,10 @@ index 0000000..78a717b
 +#endif
 diff --git a/src/fast/backends/xenos/fast3d.frag b/src/fast/backends/xenos/fast3d.frag
 new file mode 100644
-index 0000000..2df6a20
+index 0000000..6166f18
 --- /dev/null
 +++ b/src/fast/backends/xenos/fast3d.frag
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,165 @@
 +#version 450
 +// Fast3D pixel shader template for the Xenos backend (gfx_xenos.cpp). CMake writes variants of it with defines
 +// after the #version line (src/fast/CMakeLists.txt):
@@ -2675,14 +2678,21 @@ index 0000000..2df6a20
 +
 +#define WRAP(x, lo, hi) (mod((x) - (lo), (hi) - (lo)) + (lo))
 +
-+// Three-point filtering as libultraship's filter3point; every value named once, as xost wants with a discard.
++// Three-point filtering as libultraship's filter3point; every value named once, as xost wants with a discard. The
++// second and third texels sit one texel from the first, towards the triangle the sample is in: sign(o) is 1 - 2s
++// there, where |o| isn't 0 (oot360: 15 fewer instructions a texture than computing each coordinate apart).
 +#define THREE_POINT(P_, tex, uv, size) \
++	vec2 P_##i = vec2(1.0) / (size); \
 +	vec2 P_##f = fract((uv) * (size) - vec2(0.5)); \
-+	vec2 P_##o = P_##f - vec2(step(1.0, P_##f.x + P_##f.y)); \
-+	vec4 P_##c0 = texture(tex, (uv) - P_##o / (size)); \
-+	vec4 P_##c1 = texture(tex, (uv) - vec2(P_##o.x - sign(P_##o.x), P_##o.y) / (size)); \
-+	vec4 P_##c2 = texture(tex, (uv) - vec2(P_##o.x, P_##o.y - sign(P_##o.y)) / (size)); \
-+	vec4 P_ = P_##c0 + abs(P_##o.x) * (P_##c1 - P_##c0) + abs(P_##o.y) * (P_##c2 - P_##c0);
++	float P_##s = step(1.0, P_##f.x + P_##f.y); \
++	vec2 P_##o = P_##f - vec2(P_##s); \
++	vec2 P_##b = (uv) - P_##o * P_##i; \
++	vec2 P_##d = (1.0 - 2.0 * P_##s) * P_##i; \
++	vec4 P_##c0 = texture(tex, P_##b); \
++	vec4 P_##c1 = texture(tex, vec2(P_##b.x + P_##d.x, P_##b.y)); \
++	vec4 P_##c2 = texture(tex, vec2(P_##b.x, P_##b.y + P_##d.y)); \
++	vec2 P_##w = abs(P_##o); \
++	vec4 P_ = P_##c0 + P_##w.x * (P_##c1 - P_##c0) + P_##w.y * (P_##c2 - P_##c0);
 +
 +// Each operand's pixel terms, only those the variant can weigh. The second cycle reads texel0 and texel1 swapped, as
 +// libultraship does, so there texel0's weights take t1.
@@ -2781,10 +2791,10 @@ index 0000000..2df6a20
 +}
 diff --git a/src/fast/backends/xenos/fast3d.vert b/src/fast/backends/xenos/fast3d.vert
 new file mode 100644
-index 0000000..433df14
+index 0000000..1489b4c
 --- /dev/null
 +++ b/src/fast/backends/xenos/fast3d.vert
-@@ -0,0 +1,64 @@
+@@ -0,0 +1,68 @@
 +#version 450
 +// Fast3D vertex shader for the Xenos backend (gfx_xenos.cpp). The interpreter packs each vertex as its shader needs
 +// (position, then per texture its coordinates and clamp limits, fog, grayscale, then the combiner inputs); the backend
@@ -2837,6 +2847,10 @@ index 0000000..433df14
 +	// Prim depth is one depth for the whole draw: set in clip space, as the pixel shader writing depth would keep
 +	// the GPU's hierarchical depth off.
 +	p.z = mix(p.z, pc.prim.y * p.w, pc.prim.x);
++	// Depth clamped rather than clipped, as libultraship's other backends draw (GL_DEPTH_CLAMP, D3D11's
++	// DepthClipEnable off, Metal's DepthClipModeClamp), which Xenos has no switch for: a vertex in front of the camera
++	// but nearer than the near plane (Link's hand and the slingshot in first person) keeps depth 0, not cut away.
++	p.z = mix(p.z, min(max(p.z, 0.0), p.w), step(0.0, p.w));
 +	gl_Position = p;
 +	v_uv = vec4(a_uv0, a_uv1);
 +	v_clamp = vec4(a_clamp_s0, a_clamp_t0, a_clamp_s1, a_clamp_t1);
@@ -2888,7 +2902,7 @@ index 0000000..d040528
 +	v_color = a_color;
 +}
 diff --git a/src/fast/interpreter.cpp b/src/fast/interpreter.cpp
-index 730b6f2..1c5b5c8 100644
+index 730b6f2..f24ad98 100644
 --- a/src/fast/interpreter.cpp
 +++ b/src/fast/interpreter.cpp
 @@ -71,6 +71,13 @@ std::stack<std::string> currentDir;
@@ -4003,7 +4017,20 @@ index 730b6f2..1c5b5c8 100644
      ucode_handler_index = ucode;
  
      // Reset some RSP state values upon ucode load to deal with hardware quirks discovered by emulators
-@@ -5145,6 +5209,7 @@ void Interpreter::RunGuiOnly() {
+@@ -4980,6 +5044,12 @@ void Interpreter::Init(class GfxWindowBackend* wapi, class GfxRenderingAPI* rapi
+     mCurDimensions.internal_mul =
+         Ship::Context::GetRawInstance()->GetConsoleVariables()->GetFloat(CVAR_INTERNAL_RESOLUTION, 1);
+     mMsaaLevel = Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger(CVAR_MSAA_VALUE, 1);
++#ifdef __XSDK__
++    // oot360: what fits the Xbox 360's 10 MB of eDRAM untiled is 1280x720 at one sample, colour and depth; more
++    // stopped at an assert in xsdk (test 13). A saved setting from then is held to it too.
++    mCurDimensions.internal_mul = std::min(mCurDimensions.internal_mul, 1.0f);
++    mMsaaLevel = 1;
++#endif
+ 
+     mCurDimensions.width = width;
+     mCurDimensions.height = height;
+@@ -5145,6 +5215,7 @@ void Interpreter::RunGuiOnly() {
  }
  
  void Interpreter::Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_replacements) {
@@ -4011,7 +4038,7 @@ index 730b6f2..1c5b5c8 100644
      SpReset();
  
      mGetPixelDepthPending.clear();
-@@ -5359,7 +5424,7 @@ int32_t gfx_check_image_signature(const char* imgData) {
+@@ -5359,7 +5430,7 @@ int32_t gfx_check_image_signature(const char* imgData) {
      }
  #endif
  
@@ -4020,7 +4047,7 @@ index 730b6f2..1c5b5c8 100644
  }
  
  void Interpreter::RegisterBlendedTexture(const char* name, uint8_t* mask, uint8_t* replacement) {
-@@ -5369,7 +5434,7 @@ void Interpreter::RegisterBlendedTexture(const char* name, uint8_t* mask, uint8_
+@@ -5369,7 +5440,7 @@ void Interpreter::RegisterBlendedTexture(const char* name, uint8_t* mask, uint8_
  
      if (gfx_check_image_signature(reinterpret_cast<char*>(replacement))) {
          Fast::Texture* tex = std::static_pointer_cast<Fast::Texture>(
@@ -4029,7 +4056,24 @@ index 730b6f2..1c5b5c8 100644
                                       reinterpret_cast<char*>(replacement)))
                                   .get();
  
-@@ -5493,26 +5558,26 @@ void gfx_cc_get_features(uint64_t shader_id0, uint64_t shader_id1, struct CCFeat
+@@ -5394,10 +5465,16 @@ void Interpreter::SetNativeDimensions(float width, float height) {
+ }
+ 
+ void Interpreter::SetResolutionMultiplier(float multiplier) {
++#ifdef __XSDK__
++    multiplier = std::min(multiplier, 1.0f);
++#endif
+     mCurDimensions.internal_mul = multiplier;
+ }
+ 
+ void Interpreter::SetMsaaLevel(uint32_t level) {
++#ifdef __XSDK__
++    level = 1;
++#endif
+     mMsaaLevel = level;
+ }
+ 
+@@ -5493,26 +5570,26 @@ void gfx_cc_get_features(uint64_t shader_id0, uint64_t shader_id1, struct CCFeat
  
  extern "C" int gfx_create_framebuffer(uint32_t width, uint32_t height, uint32_t native_width, uint32_t native_height,
                                        uint8_t resize, bool forceFixedAspect) {

@@ -702,7 +702,7 @@ index ae098993..4ffaeca5 100644
  
      if (CVarGetInteger(CVAR_SETTING("Menu.SidebarSearch"), 0)) {
 diff --git a/soh/soh/SohGui/SohMenuSettings.cpp b/soh/soh/SohGui/SohMenuSettings.cpp
-index 476f99f3..e0500da0 100644
+index 476f99f3..eb0f4067 100644
 --- a/soh/soh/SohGui/SohMenuSettings.cpp
 +++ b/soh/soh/SohGui/SohMenuSettings.cpp
 @@ -142,7 +142,11 @@ void SohMenu::AddMenuSettings() {
@@ -738,7 +738,35 @@ index 476f99f3..e0500da0 100644
      AddWidget(path, "Accessibility", WIDGET_SEPARATOR_TEXT);
  #if defined(_WIN32) || defined(__APPLE__) || defined(ESPEAK)
      AddWidget(path, "Text to Speech", WIDGET_CVAR_CHECKBOX)
-@@ -427,7 +445,16 @@ void SohMenu::AddMenuSettings() {
+@@ -334,10 +352,12 @@ void SohMenu::AddMenuSettings() {
+     path.sidebarName = "Graphics";
+     AddSidebarEntry("Settings", "Graphics", 3);
+     AddWidget(path, "Graphics Options", WIDGET_SEPARATOR_TEXT);
++#ifndef __XSDK__ // the Xbox 360 has only the screen
+     AddWidget(path, "Toggle Fullscreen", WIDGET_BUTTON)
+         .RaceDisable(false)
+         .Callback([](WidgetInfo& info) { Ship::Context::GetRawInstance()->GetWindow()->ToggleFullscreen(); })
+         .Options(ButtonOptions().Tooltip("Toggles Fullscreen On/Off."));
++#endif
+     AddWidget(path, "Internal Resolution", WIDGET_CVAR_SLIDER_FLOAT)
+         .CVar(CVAR_INTERNAL_RESOLUTION)
+         .RaceDisable(false)
+@@ -361,8 +381,13 @@ void SohMenu::AddMenuSettings() {
+                 .ShowButtons(false)
+                 .IsPercentage()
+                 .Min(0.5f)
++#ifdef __XSDK__
++                // oot360: above 100% doesn't fit the Xbox 360's eDRAM.
++                .Max(1.0f));
++#else
+                 .Max(2.0f));
+-#ifndef __WIIU__
++#endif
++#if !defined(__WIIU__) && !defined(__XSDK__)
+     AddWidget(path, "Anti-aliasing (MSAA)", WIDGET_CVAR_SLIDER_INT)
+         .CVar(CVAR_MSAA_VALUE)
+         .RaceDisable(false)
+@@ -427,7 +452,16 @@ void SohMenu::AddMenuSettings() {
      AddWidget(path, "Texture Filter (Needs reload)", WIDGET_CVAR_COMBOBOX)
          .CVar(CVAR_TEXTURE_FILTER)
          .RaceDisable(false)
