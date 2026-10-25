@@ -169,6 +169,13 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
 - **Test 15b:** (built, not yet run) O2rArchive on xsdk reads through the one handle Open made, under a mutex; the 46
   converted archives merged into 4 by tools/hdpack/merge_packs.py (A 3DS Experience 158 MB, B Art Plus Link, C PT-BR
   3DS Experience, Z Xbox Buttons), later files replacing earlier ones as the game would load them.
+  Result (user, 2026-10-25): runs with the mods, but 25-29 fps at a 60 target: the interpreter took 30-37 ms a frame,
+  20 of it in G_VTX_OTR_FILEPATH (0x24, 450 a frame, 44 us each), 6 in G_DL_OTR_FILEPATH (0x27), 1 in
+  G_SETTIMG_OTR_FILEPATH (0x25): the mods' XML display lists name vertices, lists and textures by path, each a full
+  LoadResource; vertices 8-12 ms (3DS models). 63 MB free after the third GPU pool.
+- **Test 16:** (built, not yet run) GetResourceRawPointer(name) and the texture-by-path command keep what each path
+  resolved to, per thread, until gResourceGeneration changes (a map with string_view lookup, no allocation); the game
+  thread's ResourceGetDataByName benefits too. GfxSpVertex reads the MP matrix and the aspect ratio once a call.
 
 ## Not done yet / known gaps
 - Title screen 2-cycle effect, logo and text; controller input (test 6); 60 fps.
