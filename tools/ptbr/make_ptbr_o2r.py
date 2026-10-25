@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """make_ptbr_o2r: builds ptbr.o2r, the optional Brazilian Portuguese text for oot360, from the player's own ROM.
 
-    make_ptbr_o2r.py ROM OUT.o2r
+    make_ptbr_o2r.py ROM OUT.o2r [USA_ROM OOT_O2R]
 
 ROM is the player's Ocarina of Time USA 1.0 already patched with the PT-BR v1.8 translation (joao13traducoes /
 Patcher64+, the official BPS). The archive holds what Ship of Harkinian reads in place of oot.o2r's files:
@@ -13,6 +13,11 @@ Patcher64+, the official BPS). The archive holds what Ship of Harkinian reads in
                                                           font, which the game reads without a null check) stay
   textures/nes_font_static/gMsgChar..Tex                  the 14 glyphs the translation redrew for its accents
                                                           (0x93 is a-tilde, 0x94 c-cedilla, 0x97 e-circumflex...)
+
+With the clean USA 1.0 ROM and the oot.o2r the game uses, it also carries the translated pictures: item and map
+names, the place-name cards, the A-button labels, the pause screen's titles and the title screen. The archive's
+paths for those are found by content: each texture of oot.o2r's folders is looked for in the clean ROM's file, and
+where the translation changed those bytes, the new ones go out under that path with the same header.
 
 Copy it next to soh.xex; Settings > Languages turns it on and off (from the next start). The translation's text and
 glyphs are its authors' work and the player's ROM data: the output stays on the player's machine, outside Git (the
@@ -103,8 +108,47 @@ def texture_resource(i4: bytes) -> bytes:
     return header(b"OTEX", 0) + struct.pack("<IIII", 5, 16, 16, len(i4)) + i4
 
 
+# dmadata index -> the folder of oot.o2r its textures are in.
+PICTURE_FILES = {
+    8: "icon_item_static",
+    12: "icon_item_gameover_static",
+    14: "icon_item_nes_static",
+    15: "item_name_static",
+    16: "map_name_static",
+    17: "do_action_static",
+    939: "title_static",
+}
+PICTURE_FILES.update({879 + i: "g_pn_%02d" % i for i in range(1, 57)})
+
+
+def translated_pictures(usa, ptbr, o2r_path):
+    """(path, resource) for every oot.o2r texture whose bytes the translation changed."""
+    out = []
+    tu, tp = romtool.dmatable(usa), romtool.dmatable(ptbr)
+    with zipfile.ZipFile(o2r_path) as z:
+        names = z.namelist()
+        for index, folder in PICTURE_FILES.items():
+            before, after = romtool.file_data(usa, tu[index]), romtool.file_data(ptbr, tp[index])
+            if not before or not after or len(before) != len(after):
+                continue
+            for name in names:
+                if not name.startswith("textures/" + folder + "/"):
+                    continue
+                res = z.read(name)
+                if res[4:8] != b"XETO":
+                    continue
+                size = struct.unpack_from("<I", res, 0x4C)[0]
+                data = res[0x50:0x50 + size]
+                if len(data) < 32:
+                    continue
+                at = before.find(data)
+                if at >= 0 and after[at:at + len(data)] != data:
+                    out.append((name, res[:0x50] + after[at:at + len(data)]))
+    return out
+
+
 def main():
-    if len(sys.argv) != 3:
+    if len(sys.argv) not in (3, 5):
         raise SystemExit(__doc__)
     rom_path, out_path = sys.argv[1], sys.argv[2]
     if romtool.inside_repo(out_path):
@@ -126,7 +170,13 @@ def main():
         for glyph, name in REDRAWN.items():
             off = (glyph - FIRST_GLYPH) * GLYPH_BYTES
             z.writestr("textures/nes_font_static/" + name, texture_resource(font[off:off + GLYPH_BYTES]))
-    print(f"{out_path}: {count} messages, {len(REDRAWN)} glyphs")
+        pictures = []
+        if len(sys.argv) == 5:
+            usa, _ = romtool.load(sys.argv[3])
+            pictures = translated_pictures(usa, rom, sys.argv[4])
+            for name, res in pictures:
+                z.writestr(name, res)
+    print(f"{out_path}: {count} messages, {len(REDRAWN)} glyphs, {len(pictures)} pictures")
 
 
 if __name__ == "__main__":

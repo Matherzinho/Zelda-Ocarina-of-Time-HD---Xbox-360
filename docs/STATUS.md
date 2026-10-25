@@ -117,15 +117,34 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
   for the render before the next hand-over, at game state changes, texture cache edits, blended textures and resource
   directory pushes; frames draw on the game thread while a menu is open; pixel depth answers "far" on the game
   thread; gOot360.RenderThread turns it off. Phase profiles per thread.
+  Result (user, 2026-10-24): starts with ptbr.o2r; the text still showed in English; slow in places; the Back menu
+  opened but couldn't be navigated and its text was unreadable. Log: the game thread waited for the render thread
+  75-94% of the time, the render thread for the GPU up to 45% (21 ms a frame at 20.4 fps against a 30 fps target);
+  the interpreter took 8-12 ms a frame, 5 ms of it outside the profiled slots.
+- **Test 12:** (built, not yet run) the GPU: the combiner's sources a vertex carries (inputs 1-7, the constants) are
+  summed in the vertex shader, one interpolant an operand, and the pixel shader adds only texels, the first cycle and
+  noise, colour and alpha in one vec4; variants for noise and for each texture read (128). xost's count: 35 ALU
+  instructions for a one-cycle textured pixel (was 128), 86 for two cycles with two textures (was 235). The
+  combiner's constants go to the GPU once while draws keep to one program. Checked against the 51 programs of the
+  test 6-10 captures: same result for random sources. Linear texture filtering by default on xsdk (three-point adds
+  three fetches and ~30 instructions a texture; Settings > Graphics keeps it). The CPU: the interpreter's handlers took
+  a shared_ptr (mInstance.lock()) and GetResourceManager() for each command, and each display list, vertex or matrix
+  hash went through LoadResource (strings, alternate-asset path, two locks, a promise); now plain pointers and a
+  per-thread hash -> pointer cache, emptied whenever the resource cache changes (gResourceGeneration). The ImGui font
+  atlas was uploaded from ImU32 pixels, whose bytes on big-endian are A,B,G,R: glyph coverage went to red and every
+  glyph was a solid box; now built from the alpha8 atlas. Logs added: menu navigation state every second while it's
+  open, how many PT-BR messages replaced the table and message 0x1000's text, render thread idle and GPU-wait phases.
+  ptbr.o2r now also carries 267 translated pictures (item and map names, place cards, A-button labels, pause titles,
+  title screen), found by content in oot.o2r's folders (tools/ptbr, with the clean USA ROM and oot.o2r).
 
 ## Not done yet / known gaps
 - Title screen 2-cycle effect, logo and text; controller input (test 6); 60 fps.
 - Depth readback (`GetPixelDepth` answers "far": lens flare occlusion is off); MSAA; texture masks/blends.
-- Combiner shader is the general one: specialised shaders for the hottest combiners come after measuring.
+- Combiner shader: general (weights), split between the vertex and pixel shaders since test 12.
 - Big-endian loading of `.o2r` resources made by torch on a little-endian PC is untested (Wii U used the older
   OTR pipeline).
-- PT-BR: dialogue text and font done (tools/ptbr); still English: item/map names, place-name cards, do-action
-  labels and title (textures). Redux features as options.
+- PT-BR: dialogue text, font and the translated pictures (tools/ptbr); whether the text shows on the console is
+  still to be seen (test 11 showed English). Redux features as options.
 - 4:3 option, widescreen FOV, menu defaults for the console.
 
 ## User data (local only, verified 2026-10-24)

@@ -156,7 +156,7 @@ index 22adf036..740d2030 100644
  #endif
  #if defined(__APPLE__) && defined(NDEBUG)
 diff --git a/soh/soh/OTRGlobals.cpp b/soh/soh/OTRGlobals.cpp
-index 67bd1777..213b1f88 100644
+index 67bd1777..f7ccede8 100644
 --- a/soh/soh/OTRGlobals.cpp
 +++ b/soh/soh/OTRGlobals.cpp
 @@ -56,7 +56,7 @@
@@ -409,7 +409,7 @@ index 67bd1777..213b1f88 100644
  
      // Destroying gui here because we have shared ptrs to LUS objects which output to SPDLOG which is destroyed before
      // these shared ptrs.
-@@ -1817,8 +1927,79 @@ void RunCommands(Gfx* Commands, int time, int step, int denom, int count) {
+@@ -1817,8 +1927,80 @@ void RunCommands(Gfx* Commands, int time, int step, int denom, int count) {
      ImGui::PopStyleColor();
  }
  
@@ -459,6 +459,7 @@ index 67bd1777..213b1f88 100644
 +        Gfx* commands;
 +        std::vector<Oot360RenderFrame> frames;
 +        uint64_t job;
++        OOT360_PHASE("render thread: idle");
 +        {
 +            std::unique_lock<std::mutex> lock(sRenderMutex);
 +            sRenderCv.wait(lock, [] { return sRenderSubmitted != sRenderCompleted; });
@@ -489,7 +490,7 @@ index 67bd1777..213b1f88 100644
      {
          std::unique_lock<std::mutex> Lock(audio.mutex);
          audio.processing = true;
-@@ -1865,7 +2046,56 @@ extern "C" void Graph_ProcessGfxCommands(Gfx* commands) {
+@@ -1865,7 +2047,56 @@ extern "C" void Graph_ProcessGfxCommands(Gfx* commands) {
          count = 1;
      }
  
@@ -546,7 +547,7 @@ index 67bd1777..213b1f88 100644
  
      last_fps = fps;
      last_update_rate = R_UPDATE_RATE;
-@@ -1876,10 +2106,14 @@ extern "C" void Graph_ProcessGfxCommands(Gfx* commands) {
+@@ -1876,10 +2107,14 @@ extern "C" void Graph_ProcessGfxCommands(Gfx* commands) {
              audio.cv_from_thread.wait(Lock);
          }
      }
@@ -561,7 +562,7 @@ index 67bd1777..213b1f88 100644
          Ship::Context::GetRawInstance()->GetResourceManager()->SetAltAssetsEnabled(curAltAssets);
          gfx_texture_cache_clear();
          SOH::SkeletonPatcher::UpdateSkeletons();
-@@ -1892,6 +2126,11 @@ extern "C" void Graph_ProcessGfxCommands(Gfx* commands) {
+@@ -1892,6 +2127,11 @@ extern "C" void Graph_ProcessGfxCommands(Gfx* commands) {
  }
  
  extern "C" void OTRGetPixelDepthPrepare(float x, float y) {
@@ -573,7 +574,7 @@ index 67bd1777..213b1f88 100644
      auto wnd = std::dynamic_pointer_cast<Fast::Fast3dWindow>(Ship::Context::GetRawInstance()->GetWindow());
      if (wnd == nullptr) {
          return;
-@@ -1901,6 +2140,9 @@ extern "C" void OTRGetPixelDepthPrepare(float x, float y) {
+@@ -1901,6 +2141,9 @@ extern "C" void OTRGetPixelDepthPrepare(float x, float y) {
  }
  
  extern "C" uint16_t OTRGetPixelDepth(float x, float y) {
@@ -583,7 +584,7 @@ index 67bd1777..213b1f88 100644
      auto wnd = std::dynamic_pointer_cast<Fast::Fast3dWindow>(Ship::Context::GetRawInstance()->GetWindow());
      if (wnd == nullptr) {
          return 0;
-@@ -2449,6 +2691,9 @@ extern "C" void EntranceTracker_SetLastEntranceOverride(s16 entranceIndex) {
+@@ -2449,6 +2692,9 @@ extern "C" void EntranceTracker_SetLastEntranceOverride(s16 entranceIndex) {
  }
  
  extern "C" void Gfx_RegisterBlendedTexture(const char* name, u8* mask, u8* replacement) {
@@ -593,7 +594,7 @@ index 67bd1777..213b1f88 100644
      if (auto intP = dynamic_pointer_cast<Fast::Fast3dWindow>(Ship::Context::GetRawInstance()->GetWindow())
                          ->GetInterpreterWeak()
                          .lock()) {
-@@ -2459,6 +2704,9 @@ extern "C" void Gfx_RegisterBlendedTexture(const char* name, u8* mask, u8* repla
+@@ -2459,6 +2705,9 @@ extern "C" void Gfx_RegisterBlendedTexture(const char* name, u8* mask, u8* repla
  }
  
  extern "C" void Gfx_UnregisterBlendedTexture(const char* name) {
@@ -603,7 +604,7 @@ index 67bd1777..213b1f88 100644
      if (auto intP = dynamic_pointer_cast<Fast::Fast3dWindow>(Ship::Context::GetRawInstance()->GetWindow())
                          ->GetInterpreterWeak()
                          .lock()) {
-@@ -2469,6 +2717,9 @@ extern "C" void Gfx_UnregisterBlendedTexture(const char* name) {
+@@ -2469,6 +2718,9 @@ extern "C" void Gfx_UnregisterBlendedTexture(const char* name) {
  }
  
  extern "C" void Gfx_TextureCacheDelete(const uint8_t* texAddr) {
@@ -701,7 +702,7 @@ index ae098993..4ffaeca5 100644
  
      if (CVarGetInteger(CVAR_SETTING("Menu.SidebarSearch"), 0)) {
 diff --git a/soh/soh/SohGui/SohMenuSettings.cpp b/soh/soh/SohGui/SohMenuSettings.cpp
-index 476f99f3..537fb8b5 100644
+index 476f99f3..e0500da0 100644
 --- a/soh/soh/SohGui/SohMenuSettings.cpp
 +++ b/soh/soh/SohGui/SohMenuSettings.cpp
 @@ -142,7 +142,11 @@ void SohMenu::AddMenuSettings() {
@@ -737,6 +738,23 @@ index 476f99f3..537fb8b5 100644
      AddWidget(path, "Accessibility", WIDGET_SEPARATOR_TEXT);
  #if defined(_WIN32) || defined(__APPLE__) || defined(ESPEAK)
      AddWidget(path, "Text to Speech", WIDGET_CVAR_CHECKBOX)
+@@ -427,7 +445,16 @@ void SohMenu::AddMenuSettings() {
+     AddWidget(path, "Texture Filter (Needs reload)", WIDGET_CVAR_COMBOBOX)
+         .CVar(CVAR_TEXTURE_FILTER)
+         .RaceDisable(false)
++#ifdef __XSDK__
++        // Linear on the Xbox 360: three-point takes three fetches a texel and as much arithmetic again as the
++        // combiner (libultraship Fast3dWindow.cpp, oot360).
++        .Options(ComboboxOptions()
++                     .Tooltip("Sets the applied Texture Filtering. Linear is the fastest on the Xbox 360.")
++                     .ComboMap(textureFilteringMap)
++                     .DefaultIndex(Fast::FILTER_LINEAR));
++#else
+         .Options(ComboboxOptions().Tooltip("Sets the applied Texture Filtering.").ComboMap(textureFilteringMap));
++#endif
+ 
+     path.column = SECTION_COLUMN_2;
+     AddWidget(path, "Advanced Graphics Options", WIDGET_SEPARATOR_TEXT);
 diff --git a/soh/soh/platform/xbox360/AudioTrace.c b/soh/soh/platform/xbox360/AudioTrace.c
 new file mode 100644
 index 00000000..60178a3c
@@ -1010,10 +1028,43 @@ index 00000000..fadc4f28
 +}
 +#endif
 diff --git a/soh/soh/z_message_OTR.cpp b/soh/soh/z_message_OTR.cpp
-index 1d2a70cf..55daac5e 100644
+index 1d2a70cf..aeca7e28 100644
 --- a/soh/soh/z_message_OTR.cpp
 +++ b/soh/soh/z_message_OTR.cpp
-@@ -52,7 +52,12 @@ MessageTableEntry* OTRMessage_LoadTable(const std::string& filePath, bool isNES)
+@@ -1,5 +1,7 @@
+ #include <ship/Context.h>
+ #include <ship/resource/ResourceManager.h>
++#include <spdlog/spdlog.h>
++#include <algorithm>
+ 
+ #include "soh/resource/type/Text.h"
+ 
+@@ -27,6 +29,24 @@ static void OTRMessage_LoadCustom(const std::string& folderPath, MessageTableEnt
+     for (auto& tPath : lst) {
+         auto file = std::static_pointer_cast<SOH::Text>(
+             Ship::Context::GetRawInstance()->GetResourceManager()->LoadResource(tPath));
++#ifdef __XSDK__
++        // oot360: how many of the archive's messages took their place (the PT-BR text, ptbr.o2r).
++        if (file == nullptr) {
++            SPDLOG_ERROR("oot360: messages {} did not load", tPath);
++            continue;
++        }
++        size_t replaced = 0;
++        for (const auto& m : file->messages) {
++            replaced += std::find_if(table, table + tableSize,
++                                     [id = m.id](const auto& entry) { return entry.textId == id; }) != table + tableSize;
++        }
++        SPDLOG_INFO("oot360: {}: {} messages, {} replace the table's {}", tPath, file->messages.size(), replaced,
++                    tableSize);
++#else
++        if (file == nullptr) {
++            continue;
++        }
++#endif
+ 
+         for (size_t j = 0; j < file->messages.size(); ++j) {
+             // Check if same text ID exists already
+@@ -52,7 +72,12 @@ MessageTableEntry* OTRMessage_LoadTable(const std::string& filePath, bool isNES)
      // Allocate room for an additional message
      // OTRTODO: Should not be malloc'ing here. It's fine for now since we check elsewhere that the message table is
      // already null.
@@ -1027,7 +1078,7 @@ index 1d2a70cf..55daac5e 100644
  
      for (size_t i = 0; i < file->messages.size(); i++) {
          SetMessageEntry(table[i], file->messages[i]);
-@@ -60,8 +65,11 @@ MessageTableEntry* OTRMessage_LoadTable(const std::string& filePath, bool isNES)
+@@ -60,11 +85,28 @@ MessageTableEntry* OTRMessage_LoadTable(const std::string& filePath, bool isNES)
          if (isNES && file->messages[i].id == 0xFFFC)
              _message_0xFFFC_nes = (char*)file->messages[i].msg.c_str();
      }
@@ -1040,6 +1091,23 @@ index 1d2a70cf..55daac5e 100644
  
      // Assert that the first message starts at the first text ID
      assert(table[0].textId == 0x0001);
++#ifdef __XSDK__
++    // oot360: a message every player sees first (Navi's wake-up call), so the log shows which language took.
++    for (size_t i = 0; i < file->messages.size(); i++) {
++        if (table[i].textId == 0x1000) {
++            std::string sample(table[i].segment, std::min<size_t>(table[i].msgSize, 40));
++            for (char& c : sample) {
++                if ((unsigned char)c < 0x20 || (unsigned char)c > 0x7E) {
++                    c = '.';
++                }
++            }
++            SPDLOG_INFO("oot360: {} message 0x1000: {}", filePath, sample);
++        }
++    }
++#endif
+ 
+     return table;
+ }
 diff --git a/soh/src/code/game.c b/soh/src/code/game.c
 index 8505d5e8..86a49e3a 100644
 --- a/soh/src/code/game.c
