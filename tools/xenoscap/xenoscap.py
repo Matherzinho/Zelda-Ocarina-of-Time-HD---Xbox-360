@@ -15,6 +15,8 @@ import sys
 
 from PIL import Image
 
+FULL = bool(os.environ.get("XENOSCAP_FULL"))  # vertices at full float precision, to compare shared corners
+
 DRAW_FIELDS = ("index id0hi id0lo id1hi id1lo variant numFloats numTris numInputs used0 used1 texId0 texId1 texW0 texW1 "
                "texH0 texH1 linear0 linear1 threePoint0 threePoint1 addrU0 addrU1 addrV0 addrV1 depthKey useAlpha "
                "decal fb vp0 vp1 vp2 vp3 sc0 sc1 sc2 sc3 twoCycle mayKill vboFloats").split()
@@ -88,7 +90,7 @@ def main():
                         lines.append(f"  {stage} {name:14s} " + " ".join(f"{x:8.3f}" for x in v))
             nf = d["numFloats"]
             for vtx in range(min(6, len(vbo) // max(nf, 1))):
-                lines.append("  v%d: " % vtx + " ".join(f"{x:.4f}" for x in vbo[vtx * nf:(vtx + 1) * nf]))
+                lines.append("  v%d: " % vtx + " ".join((f"{x:.9g}" if FULL else f"{x:.4f}") for x in vbo[vtx * nf:(vtx + 1) * nf]))
         elif kind == 3:
             tid, w, h, k = struct.unpack(">IIII", body[:16])
             px = body[16:16 + w * h * 4]

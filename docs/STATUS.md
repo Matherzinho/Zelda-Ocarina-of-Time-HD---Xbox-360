@@ -201,6 +201,23 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
   gResourceAppearGeneration (a resource appearing) only drops the remembered misses, so a new actor's load no longer
   costs the next frame ~500 slow lookups. Triangle setup: bytes to floats from a table, texture size divisions as
   reciprocal multiplies.
+  Result (user, 2026-10-25): fewer stutters; the title still slow even with linear filtering; dark lines across the
+  sky. Log: the title's display list 32-48 ms, G_VTX_OTR_FILEPATH ~16 us a call (1,800 calls), TRI2 13,700 a frame;
+  never waiting for the GPU. Captures 1607 and 3027: the lines are the seams between sky panels (the panels' shared
+  corners are bit-identical, see xenoscap XENOSCAP_FULL=1); 3DS Experience's sky images carry a black frame (1 texel
+  left and top, 13 columns right) that the panels' half-texel inset skips at the mod's 4x but not at our 2x.
+- **Test 21:** (built, not yet run) tools/hdpack fills a sky's (*Skybox*) black frame from the texels inside before
+  scaling down; `--files`/`--name` make a patch archive ("A1 Skybox Fix.o2r", the 52 skies) on top of the merged pack.
+  Mods load in name order (FATX lists in copy order). Vertices: vspltw by inline asm (GCC 15's vec_splat went through
+  memory, two load-hit-stores each), UVs in VMX, clip flags ORed in VMX and stored with stvebx (no vector compares
+  to the condition register), prefetch of the next 8 vertices, light colours from a table and no per-call aspect
+  division. Triangles: the setup GfxSpTri1 works out (combiner, texture sizes, samplers, shader, UV scales, constant
+  colours) is kept while sOot360TriGen stands (bumped by every command but vertex loads, triangles, matrix and
+  display list calls, syncs and markers; by Flush and Run) and later triangles only cull and write their floats;
+  every 1024th goes the full way too and is compared (a difference turns it off and logs it). Culling by the
+  (x, y, w) determinant (negated; equal sign to the divided cross product with its flip, checked on 300,000 random
+  triangles) instead of six divisions. Log: vertices a frame, lights per vertex, setup and loop ms, ns per vertex,
+  kept/full triangle setups, and each frame over 25 ms with its resource load and texture time.
 
 ## Not done yet / known gaps
 - Title screen 2-cycle effect, logo and text; controller input (test 6); 60 fps.
