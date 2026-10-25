@@ -193,6 +193,14 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
   colour packing; stores straight into the loaded vertex, no int/float conversion through memory); positional lights
   and texgen keep the scalar code. The first 64 calls and every 512th run the scalar code after it and compare;
   a difference turns VMX off for the run and logs both.
+  Result (user, 2026-10-25): no illegal instruction, but the self-check turned VMX off at call 9 (colour only): it set
+  lights_changed before the scalar run, recomputing coefficients for a newer matrix. Still stutters; the title
+  (Link on the horse) 27 ms of interpreter.
+- **Test 20:** (built, not yet run) the check no longer forces lights_changed. Two generations for the lookup caches:
+  gResourceGeneration (a resource replaced, unloaded, dirtied, alt toggled, archive added) empties them, while
+  gResourceAppearGeneration (a resource appearing) only drops the remembered misses, so a new actor's load no longer
+  costs the next frame ~500 slow lookups. Triangle setup: bytes to floats from a table, texture size divisions as
+  reciprocal multiplies.
 
 ## Not done yet / known gaps
 - Title screen 2-cycle effect, logo and text; controller input (test 6); 60 fps.
