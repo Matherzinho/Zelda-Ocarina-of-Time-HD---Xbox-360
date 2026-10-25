@@ -4398,6 +4398,46 @@ index c62ee72..9a6de05 100644
  }
  
  } // namespace Ship
+diff --git a/src/ship/resource/archive/O2rArchive.cpp b/src/ship/resource/archive/O2rArchive.cpp
+index 13d9750..eeffdcf 100644
+--- a/src/ship/resource/archive/O2rArchive.cpp
++++ b/src/ship/resource/archive/O2rArchive.cpp
+@@ -15,6 +15,27 @@ O2rArchive::~O2rArchive() {
+     Close();
+ }
+ 
++#ifdef __XSDK__
++// oot360: one handle an archive, the one Open made, its reads taken in turn. A handle more for each thread reading at
++// once re-reads the archive's whole central directory (tens of thousands of entries in a texture pack) and takes one
++// of the 32 files xsdk's C library can hold open; with the HD packs they ran out (test 15). The disk reads one file at
++// a time anyway.
++static std::mutex sXsdkZipMutex;
++
++zip_t* O2rArchive::GetZipHandle() {
++    sXsdkZipMutex.lock();
++    if (mZipArchive == nullptr) {
++        sXsdkZipMutex.unlock();
++    }
++    return mZipArchive;
++}
++
++void O2rArchive::ReleaseZipHandle(zip_t* handle) {
++    if (handle != nullptr) {
++        sXsdkZipMutex.unlock();
++    }
++}
++#else
+ zip_t* O2rArchive::GetZipHandle() {
+     std::lock_guard<std::mutex> lock(mPoolMutex);
+     if (!mZipArchivePool.empty()) {
+@@ -33,6 +54,7 @@ void O2rArchive::ReleaseZipHandle(zip_t* handle) {
+     std::lock_guard<std::mutex> lock(mPoolMutex);
+     mZipArchivePool.push_back(handle);
+ }
++#endif
+ 
+ std::shared_ptr<File> O2rArchive::LoadFile(uint64_t hash) {
+     const std::string& filePath =
 diff --git a/src/ship/window/gui/Gui.cpp b/src/ship/window/gui/Gui.cpp
 index 1f9279b..362c728 100644
 --- a/src/ship/window/gui/Gui.cpp

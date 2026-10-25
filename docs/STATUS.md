@@ -163,6 +163,12 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
   256 px), resumable in time slices (the device shell stops background work) and deleting nothing. Djipi's 3DS
   Experience + Skilar's Art Plus Link + EduardoA's PT-BR: 46 archives, 197 MB (from about 770 MB), on the user's PC
   only.
+  Result: crashed after the title. From the 15th mod archive on, zip_open failed: xsdk's C library has 32 file
+  slots and each archive held two (O2rArchive opened one more handle for its reads, and one per concurrent reader);
+  a JSON read after that came back empty and the uncaught parse_error aborted.
+- **Test 15b:** (built, not yet run) O2rArchive on xsdk reads through the one handle Open made, under a mutex; the 46
+  converted archives merged into 4 by tools/hdpack/merge_packs.py (A 3DS Experience 158 MB, B Art Plus Link, C PT-BR
+  3DS Experience, Z Xbox Buttons), later files replacing earlier ones as the game would load them.
 
 ## Not done yet / known gaps
 - Title screen 2-cycle effect, logo and text; controller input (test 6); 60 fps.
