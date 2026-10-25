@@ -155,8 +155,219 @@ index 22adf036..740d2030 100644
  void __assert(const char* exp, const char* file, s32 line);
  #endif
  #if defined(__APPLE__) && defined(NDEBUG)
+diff --git a/soh/include/z64.h b/soh/include/z64.h
+index 5bb0bd16..655d7d09 100644
+--- a/soh/include/z64.h
++++ b/soh/include/z64.h
+@@ -94,11 +94,19 @@ typedef struct {
+ } GameInfo; // size = 0x15D4
+ 
+ // Changed the main buffers to be 1MiB to make them basically impossible to overflow
++#ifdef __XSDK__
++// oot360: a quarter of a million commands a buffer (2 MB, still 40 times the N64's largest) instead of a million: the
++// two pools took 48 MB of the console's 512, a tenth of its memory, now 12 MB. A frame that runs out isn't drawn (as on
++// the N64, graph.c), and graph.c logs the most each buffer takes.
++#define GFXPOOL_BUFFER_ENTRIES (256 * 1024)
++#else
++#define GFXPOOL_BUFFER_ENTRIES (1 * 1024 * 1024)
++#endif
+ typedef struct {
+     /* 0x00000 */ u16 headMagic; // GFXPOOL_HEAD_MAGIC
+-    /* 0x00008 */ Gfx polyOpaBuffer[1 * 1024 * 1024]; // original size was 0x17E0
+-    /* 0x0BF08 */ Gfx polyXluBuffer[1 * 1024 * 1024]; // original size was 0x800
+-    /* 0x0FF08 */ Gfx overlayBuffer[1 * 1024 * 1024]; // original size was 0x400
++    /* 0x00008 */ Gfx polyOpaBuffer[GFXPOOL_BUFFER_ENTRIES]; // original size was 0x17E0
++    /* 0x0BF08 */ Gfx polyXluBuffer[GFXPOOL_BUFFER_ENTRIES]; // original size was 0x800
++    /* 0x0FF08 */ Gfx overlayBuffer[GFXPOOL_BUFFER_ENTRIES]; // original size was 0x400
+     /* 0x11F08 */ Gfx workBuffer[0x80];
+     /* 0x11308 */ Gfx unusedBuffer[0x20];
+     /* 0x12408 */ u16 tailMagic; // GFXPOOL_TAIL_MAGIC
+diff --git a/soh/soh/Enhancements/controls/SohInputEditorWindow.cpp b/soh/soh/Enhancements/controls/SohInputEditorWindow.cpp
+index 25b464b2..cf56b804 100644
+--- a/soh/soh/Enhancements/controls/SohInputEditorWindow.cpp
++++ b/soh/soh/Enhancements/controls/SohInputEditorWindow.cpp
+@@ -1513,6 +1513,7 @@ void SohInputEditorWindow::DrawDpadControlPanel() {
+ }
+ 
+ void SohInputEditorWindow::DrawDeviceToggles(uint8_t portIndex) {
++#ifndef __XSDK__ // oot360 (as zeldaMM): no keyboard or mouse on the Xbox 360
+     ImGui::PushItemFlag(ImGuiItemFlags_Disabled, true);
+ 
+     auto keyboardButtonColor = ImGui::GetStyleColorVec4(ImGuiCol_Button);
+@@ -1534,6 +1535,7 @@ void SohInputEditorWindow::DrawDeviceToggles(uint8_t portIndex) {
+     ImGui::PopStyleColor();
+ 
+     ImGui::PopItemFlag();
++#endif
+ 
+     auto connectedDeviceManager =
+         Ship::Context::GetRawInstance()->GetControlDeck()->GetConnectedPhysicalDeviceManager();
+@@ -1612,6 +1614,7 @@ void SohInputEditorWindow::DrawLinkTab() {
+             DrawRumbleSection(portIndex);
+         }
+ 
++#ifndef __XSDK__ // oot360 (as zeldaMM): the Xbox 360 controller has no gyro and no LEDs the game can set
+         if (ImGui::CollapsingHeader("Gyro")) {
+             DrawGyroSection(portIndex);
+         }
+@@ -1619,6 +1622,7 @@ void SohInputEditorWindow::DrawLinkTab() {
+         if (ImGui::CollapsingHeader("LEDs")) {
+             DrawLEDSection(portIndex);
+         }
++#endif
+ 
+         if (ImGui::CollapsingHeader("Modifier Buttons")) {
+             DrawButtonLine("M1", portIndex, BTN_CUSTOM_MODIFIER1);
+diff --git a/soh/soh/Enhancements/kaleido.cpp b/soh/soh/Enhancements/kaleido.cpp
+index ee66375f..1f15a179 100644
+--- a/soh/soh/Enhancements/kaleido.cpp
++++ b/soh/soh/Enhancements/kaleido.cpp
+@@ -357,7 +357,18 @@ void Kaleido::Draw(PlayState* play) {
+     }
+ 
+     mEntryDl.push_back(gsSPEndDisplayList());
++#ifdef __XSDK__
++    {
++        // oot360: the render thread draws this frame while the game builds the next one (OTRGlobals.cpp), and the next
++        // one clears and refills this list: the frame calls a copy in its own gfx pool.
++        const size_t bytes = mEntryDl.size() * sizeof(Gfx);
++        Gfx* copy = (Gfx*)Graph_Alloc(play->state.gfxCtx, bytes);
++        memcpy(copy, mEntryDl.data(), bytes);
++        gSPDisplayList(POLY_OPA_DISP++, copy);
++    }
++#else
+     gSPDisplayList(POLY_OPA_DISP++, mEntryDl.data());
++#endif
+     CLOSE_DISPS(play->state.gfxCtx);
+ }
+ 
+@@ -466,7 +477,15 @@ KaleidoEntryIcon::KaleidoEntryIcon(const char* iconResourceName, int iconFormat,
+       mIconWidth(iconWidth), mIconHeight(iconHeight), mIconColor(iconColor) {
+ }
+ 
++#ifdef __XSDK__
++extern "C" void Oot360_RenderWait(void); // soh/OTRGlobals.cpp
++#endif
++
+ void KaleidoEntryIcon::RebuildVertices() {
++#ifdef __XSDK__
++    // oot360: the frame the render thread may still draw (a frame behind the game) points at these vertices
++    Oot360_RenderWait();
++#endif
+     free(vtx);
+     vtx = nullptr;
+     BuildVertices();
+diff --git a/soh/soh/Enhancements/mod_menu.cpp b/soh/soh/Enhancements/mod_menu.cpp
+index 391e374d..e16aaf9c 100644
+--- a/soh/soh/Enhancements/mod_menu.cpp
++++ b/soh/soh/Enhancements/mod_menu.cpp
+@@ -6,6 +6,7 @@
+ 
+ #include <ship/utils/StringHelper.h>
+ #include <ship/Context.h>
++#include <spdlog/spdlog.h>
+ 
+ #include "mod_menu.h"
+ #include "soh/Enhancements/audio/OotrsArchive.h"
+@@ -50,6 +51,10 @@ extern std::shared_ptr<SohMenu> mSohMenu;
+ static WidgetInfo enableModsWidget;
+ static WidgetInfo tabHotkeyWidget;
+ 
++#ifdef __XSDK__
++extern bool gOot360Portuguese; // soh/OTRGlobals.cpp: the game's text is in Portuguese
++#endif
++
+ #define CVAR_ENABLED_MODS_NAME CVAR_SETTING("EnabledMods")
+ #define CVAR_ENABLED_MODS_DEFAULT ""
+ #define CVAR_ENABLED_MODS_VALUE CVarGetString(CVAR_ENABLED_MODS_NAME, CVAR_ENABLED_MODS_DEFAULT)
+@@ -257,6 +262,18 @@ void UpdateModFiles(bool init = false, bool reset = false) {
+                 std::vector<std::string> enabledTemp(enabledModFiles);
+                 for (std::string mod : enabledTemp) {
+                     if (filePaths.contains(mod)) {
++#ifdef __XSDK__
++                        // oot360 (as zeldaMM): a Portuguese texture pack ("PT-BR" in its name: EduardoA's, and the
++                        // console's 4x and letter patches) only with the game's text in Portuguese (ptbr.o2r,
++                        // OTRGlobals.cpp); it stays on the list.
++                        if (!gOot360Portuguese && (mod.find("PT-BR") != std::string::npos ||
++                                                   mod.find("pt-BR") != std::string::npos ||
++                                                   mod.find("pt_br") != std::string::npos ||
++                                                   mod.find("Pt_br") != std::string::npos)) {
++                            SPDLOG_INFO("oot360: {} left out: the game's text isn't in Portuguese", mod);
++                            continue;
++                        }
++#endif
+                         GetArchiveManager()->AddArchive(filePaths.at(mod).generic_string());
+                     } else {
+                         enabledModFiles.erase(std::find(enabledModFiles.begin(), enabledModFiles.end(), mod));
+diff --git a/soh/soh/Enhancements/nametag.cpp b/soh/soh/Enhancements/nametag.cpp
+index a281d18a..8c8260d4 100644
+--- a/soh/soh/Enhancements/nametag.cpp
++++ b/soh/soh/Enhancements/nametag.cpp
+@@ -274,6 +274,14 @@ extern "C" void NameTag_RegisterForActorWithOptions(Actor* actor, const char* te
+     NameTag_RegisterHooks();
+ }
+ 
++#ifdef __XSDK__
++// oot360 (from zeldaMM): name tags rebuild one display list buffer each frame, which the render thread would still be
++// drawing from (OTRGlobals.cpp): frames draw on the game thread while there are any.
++bool NameTag_AnyActive() {
++    return !nameTags.empty();
++}
++#endif
++
+ extern "C" void NameTag_RegisterForActor(Actor* actor, const char* text) {
+     NameTag_RegisterForActorWithOptions(actor, text, {});
+ }
+diff --git a/soh/soh/Notification/Notification.cpp b/soh/soh/Notification/Notification.cpp
+index d26807a0..0fcbcc52 100644
+--- a/soh/soh/Notification/Notification.cpp
++++ b/soh/soh/Notification/Notification.cpp
+@@ -10,13 +10,18 @@ extern "C" {
+ }
+ 
+ #include <fast/Fast3dGui.h>
++#include <mutex>
+ 
+ namespace Notification {
+ 
+ static uint32_t nextId = 0;
+ static std::vector<Options> notifications = {};
++// oot360 (from zeldaMM): the game thread emits notifications (autosave, randomizer items) while the render thread draws
++// them on the Xbox 360 (OTRGlobals.cpp): the list is used under this lock.
++static std::mutex notificationsMutex;
+ 
+ void Window::Draw() {
++    std::lock_guard<std::mutex> lock(notificationsMutex);
+     auto vp = ImGui::GetMainViewport();
+ 
+     const float margin = 30.0f;
+@@ -115,6 +120,7 @@ void Window::Draw() {
+ }
+ 
+ void Window::UpdateElement() {
++    std::lock_guard<std::mutex> lock(notificationsMutex);
+     for (size_t index = 0; index < notifications.size(); ++index) {
+         auto& notification = notifications[index];
+ 
+@@ -130,11 +136,14 @@ void Window::UpdateElement() {
+ }
+ 
+ void Emit(Options notification) {
+-    notification.id = nextId++;
+     if (notification.remainingTime == 0.0f) {
+         notification.remainingTime = CVarGetFloat(CVAR_SETTING("Notifications.Duration"), 10.0f);
+     }
+-    notifications.push_back(notification);
++    {
++        std::lock_guard<std::mutex> lock(notificationsMutex);
++        notification.id = nextId++;
++        notifications.push_back(notification);
++    }
+     if (!notification.mute && !CVarGetInteger(CVAR_SETTING("Notifications.Mute"), 0)) {
+         Audio_PlaySfxGeneral(NA_SE_SY_METRONOME, &gSfxDefaultPos, 4, &gSfxDefaultFreqAndVolScale,
+                              &gSfxDefaultFreqAndVolScale, &gSfxDefaultReverb);
 diff --git a/soh/soh/OTRGlobals.cpp b/soh/soh/OTRGlobals.cpp
-index 67bd1777..9837491b 100644
+index 67bd1777..0e22869c 100644
 --- a/soh/soh/OTRGlobals.cpp
 +++ b/soh/soh/OTRGlobals.cpp
 @@ -56,7 +56,7 @@
@@ -168,19 +379,30 @@ index 67bd1777..9837491b 100644
  #include "Extractor/Extract.h"
  #endif
  
-@@ -76,15 +76,26 @@
+@@ -76,15 +76,37 @@
  #endif
  
  #include <functions.h>
 +#ifdef __XSDK__
++#include <SDL2/SDL_events.h>
++#include <condition_variable>
++#include <deque>
++#include <exception>
++#include <thread>
++#include <typeinfo>
 +extern "C" void Oot360_LogMemory(const char* where);
 +#define OOT360_MEM(where) Oot360_LogMemory(where)
 +extern "C" void Oot360_Phase(const char* phase);
 +#define OOT360_PHASE(p) Oot360_Phase(p)
++// Whether the GUI asked for a console variable save since the last call (libultraship's Gui.cpp, from zeldaMM).
++extern "C" bool ZeldaMM_TakeCvarSave(void);
 +#else
 +#define OOT360_MEM(where)
 +#define OOT360_PHASE(p)
 +#endif
++extern "C" void Oot360_FindModelDirectories(void); // oot360: below, with the loaders
++// Waits until the render thread has drawn the frame handed over (Graph_ProcessGfxCommands); nothing elsewhere.
++extern "C" void Oot360_RenderWait(void);
  #include "Enhancements/item-tables/ItemTableManager.h"
  #include "Enhancements/Restorations/GetItemManipulation.h"
  #include "Enhancements/Lang/Lang.h"
@@ -195,7 +417,20 @@ index 67bd1777..9837491b 100644
  #include "Enhancements/game-interactor/GameInteractor.h"
  #include "Enhancements/randomizer/draw.h"
  #include <libultraship/controller/controldeck/ControlDeck.h>
-@@ -138,9 +149,11 @@ ItemTableManager* ItemTableManager::Instance;
+@@ -93,6 +115,12 @@
+ // Resource Types/Factories
+ #include "soh/resource/type/SohResourceType.h"
+ #include "soh/resource/type/Skeleton.h"
++#ifdef __XSDK__
++// oot360: the rooms' object lists, for the scene's objects loaded ahead (Oot360_SceneResources)
++#include "soh/resource/type/Scene.h"
++#include "soh/resource/type/scenecommand/SetAlternateHeaders.h"
++#include "soh/resource/type/scenecommand/SetObjectList.h"
++#endif
+ #include <ship/resource/factory/BlobFactory.h>
+ #include <fast/resource/factory/DisplayListFactory.h>
+ #include <fast/resource/factory/MatrixFactory.h>
+@@ -138,9 +166,11 @@ ItemTableManager* ItemTableManager::Instance;
  GameInteractor* GameInteractor::Instance;
  AudioCollection* AudioCollection::Instance;
  SpeechSynthesizer* SpeechSynthesizer::Instance;
@@ -207,7 +442,7 @@ index 67bd1777..9837491b 100644
  
  extern "C" char** cameraStrings;
  
-@@ -325,7 +338,13 @@ OTRGlobals::OTRGlobals() {
+@@ -325,7 +355,13 @@ OTRGlobals::OTRGlobals() {
          fontStandard = CreateFontWithSize(16.0f, "fonts/Montserrat-Regular.ttf");
          fontStandardLarger = CreateFontWithSize(20.0f, "fonts/Montserrat-Regular.ttf");
          fontStandardLargest = CreateFontWithSize(24.0f, "fonts/Montserrat-Regular.ttf");
@@ -221,7 +456,7 @@ index 67bd1777..9837491b 100644
          ImGui::GetIO().FontDefault = fontStandardLarger;
      }
  
-@@ -408,6 +427,49 @@ static bool RemoveArchiveAcrossAppDirs(const std::string& fileName) {
+@@ -408,6 +444,49 @@ static bool RemoveArchiveAcrossAppDirs(const std::string& fileName) {
      return !std::filesystem::exists(Ship::Context::LocateFileAcrossAppDirs(fileName, appShortName));
  }
  
@@ -271,7 +506,7 @@ index 67bd1777..9837491b 100644
  void OTRGlobals::RunExtract(int argc, char* argv[]) {
      bool extractDone = false;
      ExtractSteps extractStep = ES_PORT_ARCHIVE;
-@@ -821,6 +883,7 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
+@@ -821,6 +900,7 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
      Ship::WiiU::Init(appShortName);
  #endif
  }
@@ -279,7 +514,58 @@ index 67bd1777..9837491b 100644
  
  void InitGfxDebugger() {
      auto dbg =
-@@ -846,6 +909,28 @@ void OTRGlobals::Initialize() {
+@@ -837,6 +917,50 @@ void InitGfxDebugger() {
+     }
+ }
+ 
++#ifdef __XSDK__
++// oot360 (as zeldaMM): the console's defaults, set once (gOot360.DefaultsVersion) so the menus show them and the player
++// changes them as any setting: 60 frames a second where the target was the original 20, FXAA, and Ship of Harkinian's own
++// "Curated First Time Vanilla" enhancements (soh.o2r's presets: conveniences and fixes of the original's bugs that keep
++// the game as it was), without its two that cost the Xbox 360 frames: DisableLOD (every model at its most detailed,
++// far away too) and WidescreenActorCulling (actors past the 4:3 edges drawn). Enhancements > Presets > "Reset to
++// Default" takes them back off.
++static void Oot360_ApplyConsoleDefaults() {
++    const int32_t version = CVarGetInteger("gOot360.DefaultsVersion", 0);
++    if (version >= 1) {
++        return;
++    }
++    if (CVarGetInteger(CVAR_SETTING("InterpolationFPS"), 20) == 20) {
++        CVarSetInteger(CVAR_SETTING("InterpolationFPS"), 60);
++    }
++    CVarSetInteger("gOot360.Fxaa", 1);
++    static const char* const kOn[] = {
++        "AssignableTunicsAndBoots", "Autosave", "BetterOwl", "CreditsFix", "CustomizeFrogsOcarinaGame",
++        "DekuNutUpgradeFix", "DpadEquips", "DpadNoDropOcarinaInput", "DynamicWalletIcon", "EnemySpawnsOverWaterboxes",
++        "FasterRupeeAccumulator", "FileSelect.TimeFlow", "FixBrokenGiantsKnife", "FixDaruniaDanceSpeed",
++        "FixDampeGoingBackwards", "FixDungeonMinimapIcon", "FixEyesOpenWhileSleeping", "FixFloorSwitches",
++        "FixHammerHand", "FixMenuLR", "FixSawSoftlock", "FixTexturesOOB", "FixVineFall", "FixZoraHintDialogue",
++        "FixKokiriForestQuestState", "GerudoWarriorClothingFix", "GravediggingTourFix",
++        "InjectItemCounts.GoldSkulltula", "InjectItemCounts.HeartContainer", "InjectItemCounts.HeartPiece",
++        "NaviTextFix", "PulsateBossIcon", "RedGanonBlood", "RememberMapToggleState", "SceneSpecificDirtPathFix",
++        "SilverRupeeJingleExtend", "SkipSaveConfirmation", "SkipText", "TwoHandedIdle", "VisualAgony",
++    };
++    for (const char* name : kOn) {
++        CVarSetInteger((std::string(CVAR_PREFIX_ENHANCEMENT) + "." + name).c_str(), 1);
++    }
++    CVarSetInteger(CVAR_ENHANCEMENT("FrogsModifyFailTime"), 2);
++    CVarSetInteger(CVAR_ENHANCEMENT("TextSpeed"), 5);
++    CVarSetInteger("gOot360.DefaultsVersion", 1);
++    CVarSave();
++    SPDLOG_INFO("oot360: console defaults 1 applied");
++}
++#endif
++
++#ifdef __XSDK__
++// oot360: the game's text is in Portuguese (ptbr.o2r loaded): the mod menu mounts the Portuguese texture packs only
++// then (mod_menu.cpp), else the pictures would be in Portuguese and the text in English.
++bool gOot360Portuguese = false;
++#endif
++
+ void OTRGlobals::Initialize() {
+     std::string mqPath = Ship::Context::LocateFileAcrossAppDirs("oot-mq.o2r", appShortName);
+     if (std::filesystem::exists(mqPath)) {
+@@ -846,6 +970,33 @@ void OTRGlobals::Initialize() {
      if (std::filesystem::exists(ootPath)) {
          context->GetResourceManager()->GetArchiveManager()->AddArchive(ootPath);
      }
@@ -292,6 +578,7 @@ index 67bd1777..9837491b 100644
 +        if (std::filesystem::exists(ptbrPath) && CVarGetInteger("gOot360.PtBr", 1)) {
 +            context->GetResourceManager()->GetArchiveManager()->AddArchive(ptbrPath);
 +            SPDLOG_INFO("oot360: Portuguese (Brazil) text from {}", ptbrPath);
++            gOot360Portuguese = true;
 +        }
 +        // oot360: the HUD's A and B buttons in the Xbox 360 controller's colours, set once (the Cosmetics Editor
 +        // changes them as any setting); xbox_buttons.o2r in game:\mods redraws the text's button glyphs.
@@ -304,11 +591,15 @@ index 67bd1777..9837491b 100644
 +            CVarSave();
 +        }
 +    }
++    // The controller is the only way to work the menu: without its navigation, Back no longer opens or closes it.
++    if (!CVarGetInteger(CVAR_IMGUI_CONTROLLER_NAV, 1)) {
++        CVarSetInteger(CVAR_IMGUI_CONTROLLER_NAV, 1);
++    }
 +#endif
  
      std::unordered_set<uint32_t> ValidHashes = {
          OOT_PAL_MQ,     OOT_NTSC_JP_MQ, OOT_NTSC_US_MQ, OOT_PAL_GC_MQ_DBG, OOT_NTSC_US_10,
-@@ -1066,7 +1151,22 @@ int AudioPlayer_Buffered(void);
+@@ -1066,7 +1217,22 @@ int AudioPlayer_Buffered(void);
  extern "C" int AudioPlayer_GetDesiredBuffered(void);
  std::unordered_map<std::string, ExtensionEntry> ExtensionCache;
  
@@ -331,7 +622,7 @@ index 67bd1777..9837491b 100644
      while (audio.running) {
          {
              std::unique_lock<std::mutex> Lock(audio.mutex);
-@@ -1098,6 +1198,9 @@ void OTRAudio_Thread() {
+@@ -1098,6 +1264,9 @@ void OTRAudio_Thread() {
                                             num_audio_samples);
          }
  
@@ -341,7 +632,39 @@ index 67bd1777..9837491b 100644
          AudioPlayer_Play((u8*)audio_buffer,
                           num_audio_samples * (sizeof(int16_t) * NUM_AUDIO_CHANNELS * AUDIO_FRAMES_PER_UPDATE));
  
-@@ -1506,7 +1609,11 @@ OTRVersion DetectOTRVersion(std::string fileName, bool isMQ) {
+@@ -1106,6 +1275,31 @@ void OTRAudio_Thread() {
+     }
+ }
+ 
++#ifdef __XSDK__
++// oot360 (from zeldaMM): the audio thread mixes only when a game frame wakes it (Graph_ProcessGfxCommands), so the game
++// thread's long waits (a new scene's files during the black screen, the render thread busy with a slow frame) let the
++// sound card's queue run dry: the music stopped at scene changes and stuttered with the picture (zeldaMM's test 1h).
++// While waiting, this mixes another game frame's worth whenever the queue is below what the audio thread aims for.
++// Only from the game thread, while it runs no game logic: mixing stays one thing at a time.
++extern "C" void Oot360_KeepAudioGoing(void) {
++    std::unique_lock<std::mutex> lock(audio.mutex);
++    if (!audio.running) {
++        return;
++    }
++    while (audio.processing) {
++        audio.cv_from_thread.wait(lock); // the frame's own mixing first
++    }
++    if (AudioPlayer_Buffered() >= AudioPlayer_GetDesiredBuffered()) {
++        return;
++    }
++    audio.processing = true;
++    audio.cv_to_thread.notify_one();
++    while (audio.processing) {
++        audio.cv_from_thread.wait(lock);
++    }
++}
++#endif
++
+ void OTRAudio_Init() {
+     // Precache all our samples, sequences, etc...
+     ResourceMgr_LoadDirectory("audio");
+@@ -1506,7 +1700,11 @@ OTRVersion DetectOTRVersion(std::string fileName, bool isMQ) {
  }
  
  extern "C" void Messagebox_ShowErrorBox(char* title, char* body) {
@@ -353,7 +676,79 @@ index 67bd1777..9837491b 100644
  }
  
  bool VerifyArchiveVersion(OTRVersion version) {
-@@ -1580,14 +1687,19 @@ extern "C" void InitOTR(int argc, char* argv[]) {
+@@ -1547,9 +1745,39 @@ static void SetAppImageHome() {
+ }
+ #endif
+ 
++#ifdef __XSDK__
++// oot360 (from zeldaMM): an uncaught exception logs what it was and the return addresses on the stack (for addr2line
++// against the build's ELF) before the abort, which otherwise only says "signal 6".
++static void Oot360_Terminate() {
++    if (std::exception_ptr e = std::current_exception()) {
++        try {
++            std::rethrow_exception(e);
++        } catch (const std::exception& x) {
++            xsdk_log_write("terminate: %s: %s", typeid(x).name(), x.what());
++        } catch (...) {
++            xsdk_log_write("terminate: an exception that isn't a std::exception");
++        }
++    }
++    uintptr_t* sp;
++    __asm__ volatile("mr %0, 1" : "=r"(sp));
++    for (int i = 0; i < 32 && sp != nullptr; i++) {
++        uintptr_t* next = (uintptr_t*)sp[0]; // the back chain; the caller's LR is saved one word above it
++        if (next <= sp || (uintptr_t)next - (uintptr_t)sp > (16u << 20)) {
++            break;
++        }
++        xsdk_log_write("terminate: from 0x%08X", (unsigned)next[1]);
++        sp = next;
++    }
++    abort();
++}
++#endif
++
+ extern "C" void InitOTR(int argc, char* argv[]) {
+ #ifdef __linux__
+     SetAppImageHome();
++#endif
++#ifdef __XSDK__
++    std::set_terminate(Oot360_Terminate);
+ #endif
+     OTRGlobals::Instance = new OTRGlobals();
+     OTRGlobals::Instance->RunExtract(argc, argv);
+@@ -1563,9 +1791,31 @@ extern "C" void InitOTR(int argc, char* argv[]) {
+     std::shared_ptr<Ship::Config> conf = OTRGlobals::Instance->context->GetConfig();
+     SOH::RegisterVersionUpdaters(conf.get());
+     conf->RunVersionUpdates();
++#ifdef __XSDK__
++    // After the config's own updates, so these are written in its current form.
++    Oot360_ApplyConsoleDefaults();
++    // The settings a test report turns on, in the log: the player's configuration stays on the console (zeldaMM's
++    // test 1g's log ran at a 30 fps target set in the menu, and said so only through its frame times).
++    SPDLOG_INFO("oot360: settings: fps {}, alternate assets {}, FXAA {}, texture filter {}, mipmaps {}, anisotropy {}, "
++                "internal resolution {:.2f}, N64 mode {}, render thread {}, load areas ahead {}, HD import ms {}, "
++                "Portuguese {}",
++                CVarGetInteger(CVAR_SETTING("InterpolationFPS"), 20), CVarGetInteger(CVAR_SETTING("AltAssets"), 1),
++                CVarGetInteger("gOot360.Fxaa", 1), CVarGetInteger(CVAR_TEXTURE_FILTER, Fast::FILTER_LINEAR),
++                CVarGetInteger("gOot360.Mipmaps", 1), CVarGetInteger("gOot360.Anisotropy", 4),
++                CVarGetFloat(CVAR_INTERNAL_RESOLUTION, 1.0f), CVarGetInteger(CVAR_LOW_RES_MODE, 0),
++                CVarGetInteger("gOot360.RenderThread", 1), CVarGetInteger("gOot360.Prefetch", 1),
++                CVarGetInteger("gOot360.HdUploadMs", 2), CVarGetInteger("gOot360.PtBr", 1));
++#endif
+ 
+     SohGui::SetupGuiElements();
+     SohGui::SetupMenuElements();
++#ifdef __XSDK__
++    // oot360 (from zeldaMM): what was looked for before the mods were mounted (the mod menu's InitElement, just above)
++    // and not found, an HD pack's alt/ files say, is looked for again: the resource cache keeps a miss for good.
++    Ship::Context::GetRawInstance()->GetResourceManager()->Oot360_ForgetMissing();
++    // and the mods' model directories, whose textures have no stand-in (further down)
++    Oot360_FindModelDirectories();
++#endif
+ 
+     AudioCollection::Instance = new AudioCollection();
+     ActorDB::Instance = new ActorDB();
+@@ -1580,14 +1830,19 @@ extern "C" void InitOTR(int argc, char* argv[]) {
  #endif
      SpeechSynthesizer::Instance->Init();
  
@@ -373,7 +768,7 @@ index 67bd1777..9837491b 100644
      DebugConsole_Init();
  
      // #region SOH [Randomizer] TODO: Remove these and refactor spoiler file handling for randomizer
-@@ -1597,6 +1709,7 @@ extern "C" void InitOTR(int argc, char* argv[]) {
+@@ -1597,6 +1852,7 @@ extern "C" void InitOTR(int argc, char* argv[]) {
  
      Ship::Context::GetRawInstance()->GetFileDropMgr()->RegisterDropHandler(SoH_HandleConfigDrop);
  
@@ -381,7 +776,7 @@ index 67bd1777..9837491b 100644
      RegisterImGuiItemIcons();
  
      time_t now = time(NULL);
-@@ -1608,6 +1721,7 @@ extern "C" void InitOTR(int argc, char* argv[]) {
+@@ -1608,6 +1864,7 @@ extern "C" void InitOTR(int argc, char* argv[]) {
      }
  
      srand(static_cast<unsigned int>(now));
@@ -389,7 +784,7 @@ index 67bd1777..9837491b 100644
      SDLNet_Init();
      if (CVarGetInteger(CVAR_REMOTE_CROWD_CONTROL("Enabled"), 0)) {
          CrowdControl::Instance->Enable();
-@@ -1618,9 +1732,13 @@ extern "C" void InitOTR(int argc, char* argv[]) {
+@@ -1618,9 +1875,13 @@ extern "C" void InitOTR(int argc, char* argv[]) {
      if (CVarGetInteger(CVAR_REMOTE_ANCHOR("Enabled"), 0)) {
          Anchor::Instance->Enable();
      }
@@ -403,7 +798,18 @@ index 67bd1777..9837491b 100644
      Rando::StaticData::InitHashMaps();
      OTRGlobals::Instance->gRandoContext->AddExcludedOptions();
  }
-@@ -1633,6 +1751,7 @@ extern "C" void DeinitOTR() {
+@@ -1630,9 +1891,18 @@ extern "C" void SaveManager_ThreadPoolWait() {
+ }
+ 
+ extern "C" void DeinitOTR() {
++#ifdef __XSDK__
++    // oot360 (from zeldaMM): the render thread may still draw the last frame with the GUI and the window destroyed
++    // below; and the GUI's last save (quitting from the menu) was left to the game thread (Graph_ProcessGfxCommands).
++    Oot360_RenderWait();
++    if (ZeldaMM_TakeCvarSave()) {
++        CVarSave();
++    }
++#endif
      SaveManager_ThreadPoolWait();
      WaitForRandoGeneration();
      OTRAudio_Exit();
@@ -411,7 +817,7 @@ index 67bd1777..9837491b 100644
      if (CVarGetInteger(CVAR_REMOTE_CROWD_CONTROL("Enabled"), 0)) {
          CrowdControl::Instance->Disable();
      }
-@@ -1643,6 +1762,7 @@ extern "C" void DeinitOTR() {
+@@ -1643,6 +1913,7 @@ extern "C" void DeinitOTR() {
          Anchor::Instance->Disable();
      }
      SDLNet_Quit();
@@ -419,7 +825,7 @@ index 67bd1777..9837491b 100644
  
      // Destroying gui here because we have shared ptrs to LUS objects which output to SPDLOG which is destroyed before
      // these shared ptrs.
-@@ -1817,8 +1937,80 @@ void RunCommands(Gfx* Commands, int time, int step, int denom, int count) {
+@@ -1817,8 +2088,138 @@ void RunCommands(Gfx* Commands, int time, int step, int denom, int count) {
      ImGui::PopStyleColor();
  }
  
@@ -429,7 +835,8 @@ index 67bd1777..9837491b 100644
 +// out here first), the game thread runs frame N+1's logic. Before handing over the next frame, and before anything
 +// the interpreter shares with the game changes (game state changes, texture cache edits, resource directories),
 +// the game thread waits for the render (Oot360_RenderWait). With a menu open, frames draw on the game thread as
-+// before, since the menus' callbacks change game state.
++// before, since the menus' callbacks change game state, and so with a window open that reads or changes it as it draws
++// (SohGui::GameStateWindowVisible). gOot360.RenderThread turns it off.
 +namespace {
 +struct Oot360RenderFrame {
 +    float t;
@@ -440,8 +847,11 @@ index 67bd1777..9837491b 100644
 +uint64_t sRenderSubmitted = 0;
 +uint64_t sRenderCompleted = 0;
 +bool sRenderThreadStarted = false;
++bool sRenderThreadFailed = false; // no thread could be made: frames draw on the game thread
 +Gfx* sRenderCommands = nullptr;
 +std::vector<Oot360RenderFrame> sRenderFrames;
++// Set on the render thread only: what it calls (the GUI's windows) never waits for itself (zeldaMM).
++__thread bool sOnRenderThread = false;
 +
 +void Oot360_DrawFrames(Gfx* commands, std::vector<Oot360RenderFrame>& frames) {
 +    auto wnd = std::dynamic_pointer_cast<Fast::Fast3dWindow>(OTRGlobals::Instance->context->GetWindow());
@@ -462,6 +872,7 @@ index 67bd1777..9837491b 100644
 +}
 +
 +void Oot360_RenderThread() {
++    sOnRenderThread = true;
 +    Oot360_ProfileAsRender();
 +    NTSTATUS moved = xsdk_thread_move(1);
 +    xsdk_log_write("soh: render thread on hardware thread 1: 0x%08X", (unsigned)moved);
@@ -488,9 +899,62 @@ index 67bd1777..9837491b 100644
 +}
 +} // namespace
 +
++extern "C" void Oot360_KeepAudioGoing(void);
++
 +extern "C" void Oot360_RenderWait(void) {
++    if (sOnRenderThread) {
++        return;
++    }
 +    std::unique_lock<std::mutex> lock(sRenderMutex);
-+    sRenderCv.wait(lock, [] { return sRenderSubmitted == sRenderCompleted; });
++    // oot360 (from zeldaMM): in 20 ms slices: a slow frame can take half a second, and the music goes on meanwhile
++    // (Oot360_KeepAudioGoing)
++    while (!sRenderCv.wait_for(lock, std::chrono::milliseconds(20),
++                               [] { return sRenderSubmitted == sRenderCompleted; })) {
++        lock.unlock();
++        Oot360_KeepAudioGoing();
++        lock.lock();
++    }
++}
++
++namespace SohGui {
++bool GameStateWindowVisible(); // SohGui.cpp
++}
++bool NameTag_AnyActive(); // Enhancements/nametag.cpp
++
++// Whether this frame draws on the game thread: the menu, a window or a developer feature that reads or rebuilds game
++// state while it draws (the collision viewer and name tags rebuild their display list buffers each frame), the Gfx
++// debugger, no render thread, or the player's choice (gOot360.RenderThread 0).
++static bool Oot360_DrawOnGameThread(bool menuOpen) {
++    return menuOpen || SohGui::GameStateWindowVisible() || GfxDebuggerIsDebugging() || sRenderThreadFailed ||
++           !CVarGetInteger("gOot360.RenderThread", 1) || CVarGetInteger(CVAR_DEVELOPER_TOOLS("ColViewer.Enabled"), 0) ||
++           NameTag_AnyActive();
++}
++
++// Controllers plugged in or out (at start, the ones already there): libultraship opens and closes them from a GUI
++// window's update (SDLAddRemoveDeviceEventHandler, which also pumps SDL's events), and the GUI draws on the render
++// thread, while the game thread reads the controllers through the same list. Once the render thread runs, that window
++// goes and the game thread handles the events here, after HandleEvents (which leaves them in SDL's queue), with the
++// render thread idle (from zeldaMM's reviews).
++static bool sDeviceEventsOnGameThread = false;
++
++static void Oot360_HandleDeviceEvents() {
++    auto manager = Ship::Context::GetRawInstance()->GetControlDeck()->GetConnectedPhysicalDeviceManager();
++    SDL_Event event;
++    bool changed = false;
++    while (SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_CONTROLLERDEVICEADDED, SDL_CONTROLLERDEVICEADDED) > 0) {
++        manager->HandlePhysicalDeviceConnect(event.cdevice.which);
++        changed = true;
++    }
++    while (SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_CONTROLLERDEVICEREMOVED, SDL_CONTROLLERDEVICEREMOVED) > 0) {
++        manager->HandlePhysicalDeviceDisconnect(event.cdevice.which);
++        changed = true;
++    }
++    if (changed) {
++        Ship::Context::GetRawInstance()->GetWindow()->GetGui()->RefreshImGuiGamepads();
++    }
++}
++#else
++extern "C" void Oot360_RenderWait(void) {
 +}
 +#endif
 +
@@ -500,46 +964,67 @@ index 67bd1777..9837491b 100644
      {
          std::unique_lock<std::mutex> Lock(audio.mutex);
          audio.processing = true;
-@@ -1865,7 +2057,56 @@ extern "C" void Graph_ProcessGfxCommands(Gfx* commands) {
+@@ -1865,7 +2266,77 @@ extern "C" void Graph_ProcessGfxCommands(Gfx* commands) {
          count = 1;
      }
  
 +#ifdef __XSDK__
 +    OOT360_PHASE("graph: wait for the render thread");
 +    Oot360_RenderWait();
++    if (ZeldaMM_TakeCvarSave()) {
++        // The GUI's save, asked for while it drew (libultraship's Gui::CheckSaveCvars, from zeldaMM): done here, with
++        // the render thread idle, by the thread that also reads the config.
++        OOT360_PHASE("graph: save console variables");
++        CVarSave();
++    }
 +    OOT360_PHASE("graph: hand over the frame");
 +    if (wnd != nullptr) {
 +        wnd->HandleEvents();
 +    }
++    if (sDeviceEventsOnGameThread) {
++        Oot360_HandleDeviceEvents();
++    }
 +    {
 +        std::vector<Oot360RenderFrame> frames;
 +        int t = start_time;
++        // The in-between frames' matrices worked out here, on the game thread: a phase of their own in the profile.
++        OOT360_PHASE("graph: interpolate");
 +        for (int i = 0; i < count; i++) {
 +            t += step;
 +            frames.push_back({ (float)t / next_original_frame,
 +                               (t == next_original_frame) ? std::unordered_map<Mtx*, MtxF>()
 +                                                          : FrameInterpolation_Interpolate((float)t / next_original_frame) });
 +        }
++        OOT360_PHASE("graph: hand over the frame");
 +        const bool menuOpen = Ship::Context::GetRawInstance()->GetWindow()->GetGui()->GetMenuOrMenubarVisible();
-+        if (menuOpen || GfxDebuggerIsDebugging() || !CVarGetInteger("gOot360.RenderThread", 1)) {
++        if (!sRenderThreadStarted && !sRenderThreadFailed && !menuOpen && CVarGetInteger("gOot360.RenderThread", 1)) {
++            sRenderThreadStarted = true;
++            // 16 MB of stack, as the game thread has (src/code/main.c): ImGui's font atlas is built on it.
++            pthread_attr_t attr;
++            pthread_t thread;
++            pthread_attr_init(&attr);
++            pthread_attr_setstacksize(&attr, 16u << 20);
++            const int made = pthread_create(
++                &thread, &attr,
++                [](void*) -> void* {
++                    Oot360_RenderThread();
++                    return nullptr;
++                },
++                nullptr);
++            pthread_attr_destroy(&attr);
++            if (made != 0) {
++                sRenderThreadFailed = true;
++                xsdk_log_write("soh: no render thread (%d); frames draw on the game thread", made);
++            } else {
++                Ship::Context::GetRawInstance()->GetWindow()->GetGui()->RemoveGuiWindow(
++                    "SDLAddRemoveDeviceEventHandler");
++                sDeviceEventsOnGameThread = true;
++                Oot360_HandleDeviceEvents();
++            }
++        }
++        if (Oot360_DrawOnGameThread(menuOpen)) {
 +            Oot360_DrawFrames(commands, frames);
 +        } else {
-+            if (!sRenderThreadStarted) {
-+                sRenderThreadStarted = true;
-+                // 16 MB of stack, as the game thread has (src/code/main.c): ImGui's font atlas is built on it.
-+                pthread_attr_t attr;
-+                pthread_t thread;
-+                pthread_attr_init(&attr);
-+                pthread_attr_setstacksize(&attr, 16u << 20);
-+                pthread_create(
-+                    &thread, &attr,
-+                    [](void*) -> void* {
-+                        Oot360_RenderThread();
-+                        return nullptr;
-+                    },
-+                    nullptr);
-+                pthread_attr_destroy(&attr);
-+            }
 +            {
 +                std::lock_guard<std::mutex> lock(sRenderMutex);
 +                sRenderCommands = commands;
@@ -557,12 +1042,45 @@ index 67bd1777..9837491b 100644
  
      last_fps = fps;
      last_update_rate = R_UPDATE_RATE;
-@@ -1876,10 +2117,14 @@ extern "C" void Graph_ProcessGfxCommands(Gfx* commands) {
+@@ -1876,10 +2347,47 @@ extern "C" void Graph_ProcessGfxCommands(Gfx* commands) {
              audio.cv_from_thread.wait(Lock);
          }
      }
 +    OOT360_PHASE("game logic");
  
++#ifdef __XSDK__
++    {
++        // oot360 (from zeldaMM): the textures' mip levels, anisotropy and filter (gfx_xenos.cpp) are set as they
++        // upload: a change uploads them all again, once it has held for a second (the anisotropy slider steps through
++        // its values), and only for a change the GPU shows: its anisotropy goes by powers of two. The filter reaches
++        // the backend here too: the menu's "needs reload" had it re-upload everything under the old one.
++        static int sMipmaps = -1, sAnisotropy = -1, sFilter = -1; // what the textures have
++        static int sSeenMipmaps, sSeenAnisotropy, sSeenFilter, sSteady; // what the settings were last frame
++        const int mipmaps = CVarGetInteger("gOot360.Mipmaps", 1);
++        const int asked = std::clamp(CVarGetInteger("gOot360.Anisotropy", 4), 0, 16);
++        const int anisotropy = asked <= 1 ? 0 : 1 << (31 - __builtin_clz((unsigned)asked));
++        const int filter = CVarGetInteger(CVAR_TEXTURE_FILTER, Fast::FILTER_LINEAR);
++        if (sMipmaps == -1) {
++            sMipmaps = sSeenMipmaps = mipmaps;
++            sAnisotropy = sSeenAnisotropy = anisotropy;
++            sFilter = sSeenFilter = filter;
++        } else if (mipmaps != sSeenMipmaps || anisotropy != sSeenAnisotropy || filter != sSeenFilter) {
++            sSeenMipmaps = mipmaps;
++            sSeenAnisotropy = anisotropy;
++            sSeenFilter = filter;
++            sSteady = 0;
++        } else if ((mipmaps != sMipmaps || anisotropy != sAnisotropy || filter != sFilter) && ++sSteady >= 20) {
++            Oot360_RenderWait();
++            if (filter != sFilter && wnd != nullptr) {
++                wnd->SetTextureFilter((Fast::FilteringMode)filter);
++            }
++            gfx_texture_cache_clear();
++            sMipmaps = mipmaps;
++            sAnisotropy = anisotropy;
++            sFilter = filter;
++        }
++    }
++#endif
      bool curAltAssets = CVarGetInteger(CVAR_SETTING("AltAssets"), 1);
      if (prevAltAssets != curAltAssets) {
          prevAltAssets = curAltAssets;
@@ -572,7 +1090,7 @@ index 67bd1777..9837491b 100644
          Ship::Context::GetRawInstance()->GetResourceManager()->SetAltAssetsEnabled(curAltAssets);
          gfx_texture_cache_clear();
          SOH::SkeletonPatcher::UpdateSkeletons();
-@@ -1892,6 +2137,11 @@ extern "C" void Graph_ProcessGfxCommands(Gfx* commands) {
+@@ -1892,6 +2400,11 @@ extern "C" void Graph_ProcessGfxCommands(Gfx* commands) {
  }
  
  extern "C" void OTRGetPixelDepthPrepare(float x, float y) {
@@ -584,7 +1102,7 @@ index 67bd1777..9837491b 100644
      auto wnd = std::dynamic_pointer_cast<Fast::Fast3dWindow>(Ship::Context::GetRawInstance()->GetWindow());
      if (wnd == nullptr) {
          return;
-@@ -1901,6 +2151,9 @@ extern "C" void OTRGetPixelDepthPrepare(float x, float y) {
+@@ -1901,6 +2414,9 @@ extern "C" void OTRGetPixelDepthPrepare(float x, float y) {
  }
  
  extern "C" uint16_t OTRGetPixelDepth(float x, float y) {
@@ -594,7 +1112,561 @@ index 67bd1777..9837491b 100644
      auto wnd = std::dynamic_pointer_cast<Fast::Fast3dWindow>(Ship::Context::GetRawInstance()->GetWindow());
      if (wnd == nullptr) {
          return 0;
-@@ -2449,6 +2702,9 @@ extern "C" void EntranceTracker_SetLastEntranceOverride(s16 entranceIndex) {
+@@ -1909,6 +2425,553 @@ extern "C" uint16_t OTRGetPixelDepth(float x, float y) {
+     return wnd->GetPixelDepth(x, y);
+ }
+ 
++#ifdef __XSDK__
++// oot360 (from zeldaMM): a scene's or an object's resources loaded ahead, on threads of our own, when the game asks for
++// the scene or the object; the interpreter otherwise loaded each texture and display list on first use, on the render
++// thread, in the frame that drew it (40 to 110 ms stalls entering areas and in cutscenes, zeldaMM's test 1).
++//
++// Directories are listed once, from an index of every archive's files (libultraship's LoadResourcesAsync matched its
++// mask against all of oot.o2r's and the mods' files each time, a quarter of a second on this CPU). A new scene waits,
++// in the transition's black screen, for its directory and the objects every one of its rooms lists: a longer fade
++// instead of a stutter in the first seconds of the scene.
++//
++// Ship of Harkinian unloaded every alt/ resource at each game state's end (game.c, GameState_Destroy): the HD pack's
++// textures and the model mods' display lists, Link's too, read and parsed again for every scene, and the texture cache
++// emptied, so every texture uploaded again. On the Xbox 360 directories are evicted at scene changes instead
++// (Oot360_SceneResources): scenes beyond the last few visited, and when free memory is low, every scene but the newest
++// and the objects no scene asked for lately.
++extern "C" unsigned Oot360_FreeMemoryKB(void); // platform/xbox360/MemTrace.c
++// libultraship's fast/interpreter.cpp (from zeldaMM): the cached textures read from memory in these ranges go
++void ZeldaMM_TextureCacheDeleteRanges(std::vector<std::pair<uintptr_t, uintptr_t>>& ranges);
++extern "C" void Oot360_SyncResourceCaches(void);   // libultraship's ResourceManager.cpp
++extern "C" void Oot360_MarkBackgroundLoader(void); // libultraship's O2rArchive.cpp
++namespace Ship {
++bool Oot360_TextureNeedsItsOwn(std::string_view path); // libultraship's ResourceManager.cpp: no stand-in for these
++void Oot360_SetOwnTextureTest(bool (*isModelDirectory)(std::string_view directory)); // the same file
++} // namespace Ship
++extern "C" void Oot360_BoostHdImports(uint32_t frames); // libultraship's fast/interpreter.cpp
++bool Oot360_DirectoryPatched(const std::string& directory); // ResourceManagerHelpers.cpp
++
++namespace {
++std::unordered_set<std::string> sPrefetched;              // directories asked for and not evicted since
++std::unordered_map<std::string, uint32_t> sObjectLastUse; // object directory -> the scene count when last asked for
++// the skies' and the painted rooms' texture directories (textures/vr_*) -> the scene count when last set up
++std::unordered_map<std::string, uint32_t> sTextureDirLastUse;
++std::vector<std::string> sRecentScenes; // scene directories, oldest first
++uint32_t sSceneCount = 0;
++
++constexpr size_t kScenesKept = 12;             // at most a dozen scenes stay
++constexpr unsigned kRoomKB = 150u * 1024u;     // old scenes go while free memory is below this
++constexpr unsigned kLowMemoryKB = 96u * 1024u; // below this, old objects go too
++
++// directory -> its files, every archive's (alt/ ones under their alt/ directory)
++std::unordered_map<std::string, std::vector<std::string>>& DirectoryIndex() {
++    static std::unordered_map<std::string, std::vector<std::string>> index;
++    static bool built = false;
++    if (!built) {
++        built = true;
++        const uint64_t start = __builtin_ppc_get_timebase();
++        auto files = Ship::Context::GetRawInstance()->GetResourceManager()->GetArchiveManager()->ListFiles("*");
++        for (const auto& f : *files) {
++            const size_t slash = f.rfind('/');
++            if (slash != std::string::npos) {
++                index[f.substr(0, slash)].push_back(f);
++            }
++        }
++        SPDLOG_INFO("oot360: {} files in {} directories indexed in {} ms", files->size(), index.size(),
++                    (unsigned)((__builtin_ppc_get_timebase() - start) / 49875));
++    }
++    return index;
++}
++
++const std::vector<std::string>& FilesOf(const std::string& directory) {
++    static const std::vector<std::string> none;
++    auto& index = DirectoryIndex();
++    auto it = index.find(directory);
++    return it == index.end() ? none : it->second;
++}
++
++// The loaders: three threads on the hardware threads nobody else uses (render 1, game 2, audio 4), a queue of files,
++// and a count of what's left that a scene change can wait for.
++struct Loader {
++    static constexpr size_t kThreads = 3;
++    std::mutex mutex;
++    std::condition_variable work, idle;
++    std::deque<std::string> queue;
++    std::string running[kThreads]; // what each thread is loading, empty when none
++    size_t pending = 0;            // queued or being loaded
++    bool started = false;
++
++    void Start() {
++        if (started) {
++            return;
++        }
++        started = true;
++        static const uint32_t kHardwareThreads[kThreads] = { 5, 3, 0 };
++        for (size_t slot = 0; slot < kThreads; slot++) {
++            const uint32_t hw = kHardwareThreads[slot];
++            std::thread([this, hw, slot] {
++                const NTSTATUS moved = xsdk_thread_move(hw);
++                xsdk_log_write("oot360: loader thread on hardware thread %u: 0x%08X", (unsigned)hw, (unsigned)moved);
++                Oot360_MarkBackgroundLoader(); // reads after the game's own threads' (libultraship's O2rArchive.cpp)
++                auto manager = Ship::Context::GetRawInstance()->GetResourceManager();
++                {
++                    std::lock_guard<std::mutex> lock(mutex);
++                    running[slot].reserve(512); // the copy below then never allocates, so never throws
++                }
++                for (;;) {
++                    std::string path;
++                    {
++                        std::unique_lock<std::mutex> lock(mutex);
++                        work.wait(lock, [this] { return !queue.empty(); });
++                        path = std::move(queue.front());
++                        queue.pop_front();
++                        if (path.size() < running[slot].capacity()) {
++                            running[slot] = path;
++                        }
++                    }
++                    // A plain path tries its alt/ one too, so that miss is known ahead. Out of memory (a bad_alloc
++                    // here would end the game, and with pending never back to 0 a scene change would wait for
++                    // good), the file is left to load when the game asks for it.
++                    try {
++                        auto loaded = manager->LoadResource(path);
++                        // A texture that came as its HD version, its N64 one too (a few kilobytes): what a frame past
++                        // its budget for HD imports draws meanwhile (libultraship's Oot360_LoadTextureNoWait), else
++                        // the whole scene's HD textures went in its first frame (zeldaMM's review of test 1i). Not
++                        // for the model mods' objects, which never stand in.
++                        if (loaded != nullptr && !path.starts_with("alt/") && loaded->GetInitData() != nullptr &&
++                            loaded->GetInitData()->Type == static_cast<uint32_t>(Fast::ResourceType::Texture) &&
++                            loaded->GetInitData()->Path.starts_with("alt/") && !Ship::Oot360_TextureNeedsItsOwn(path)) {
++                            loaded.reset();
++                            manager->LoadResourceProcess(path, true);
++                        }
++                    } catch (const std::exception& e) {
++                        SPDLOG_ERROR("oot360: loading {} ahead failed: {}", path, e.what());
++                    } catch (...) {
++                        SPDLOG_ERROR("oot360: loading {} ahead failed", path);
++                    }
++                    {
++                        std::lock_guard<std::mutex> lock(mutex);
++                        running[slot].clear();
++                        --pending;
++                    }
++                    idle.notify_all(); // WaitRunning waits for single files
++                }
++            }).detach();
++        }
++    }
++
++    // Takes out of the queue the files no thread has started that `drop` picks (their directory is about to go).
++    template <typename F> void Drop(F drop) {
++        std::lock_guard<std::mutex> lock(mutex);
++        const size_t before = queue.size();
++        queue.erase(std::remove_if(queue.begin(), queue.end(), drop), queue.end());
++        pending -= before - queue.size();
++        if (pending == 0) {
++            idle.notify_all();
++        }
++    }
++
++    // Waits until no thread is loading a file `which` picks.
++    template <typename F> void WaitRunning(F which) {
++        std::unique_lock<std::mutex> lock(mutex);
++        idle.wait(lock, [&] {
++            for (const std::string& r : running) {
++                if (!r.empty() && which(r)) {
++                    return false;
++                }
++            }
++            return true;
++        });
++    }
++
++    void Add(const std::vector<std::string>& files) {
++        if (files.empty()) {
++            return;
++        }
++        Start();
++        {
++            std::lock_guard<std::mutex> lock(mutex);
++            for (const auto& f : files) {
++                queue.push_back(f);
++            }
++            pending += files.size();
++        }
++        work.notify_all();
++    }
++
++    // Waits until everything queued so far has loaded, up to a deadline (timebase ticks); what's left then.
++    // tick, if given, runs at least every 16 ms of the wait (and as files finish), outside the lock (the audio,
++    // Oot360_KeepAudioGoing: cheap while the sound card's queue is full)
++    size_t WaitUntil(uint64_t deadline, void (*tick)(void) = nullptr) {
++        std::unique_lock<std::mutex> lock(mutex);
++        while (pending != 0) {
++            const uint64_t now = __builtin_ppc_get_timebase();
++            if (now >= deadline) {
++                break;
++            }
++            const uint64_t until = tick != nullptr ? std::min(deadline, now + 16ull * 49875ull) : deadline;
++            idle.wait_for(lock, std::chrono::microseconds((until - now) * 1000 / 49875));
++            if (tick != nullptr && pending != 0) {
++                lock.unlock();
++                tick();
++                lock.lock();
++            }
++        }
++        return pending;
++    }
++};
++
++Loader& TheLoader() {
++    static Loader* loader = new Loader(); // lives as long as the game: its threads never end
++    return *loader;
++}
++
++// The directory's files (and their alt/ ones) unloaded, the memory each held added to `memory` ([start, end)), for the
++// interpreter's texture cache (ZeldaMM_TextureCacheDeleteRanges); how many were loaded.
++size_t Oot360_Evict(const std::string& directory, std::vector<std::pair<uintptr_t, uintptr_t>>& memory) {
++    auto manager = Ship::Context::GetRawInstance()->GetResourceManager();
++    size_t unloaded = 0;
++    for (const std::string& d : { directory, "alt/" + directory }) {
++        for (const auto& f : FilesOf(d)) {
++            auto resource = manager->GetCachedResource(f, true);
++            if (resource != nullptr) {
++                const uintptr_t start = (uintptr_t)resource->GetRawPointer();
++                const size_t size = resource->GetPointerSize();
++                if (start != 0 && size != 0) {
++                    memory.emplace_back(start, start + size);
++                }
++                resource.reset(); // before the unload, which may free it
++                unloaded++;
++            }
++            manager->UnloadResource(f);
++        }
++        sPrefetched.erase(d);
++    }
++    return unloaded;
++}
++} // namespace
++
++namespace {
++struct Oot360DirectoryHash {
++    using is_transparent = void;
++    size_t operator()(std::string_view s) const noexcept {
++        return std::hash<std::string_view>{}(s);
++    }
++};
++// Directories whose display lists a model mod replaces (Oot360_FindModelDirectories), set once the mods are mounted
++// and never changed after: the render and loader threads read it.
++std::unordered_set<std::string, Oot360DirectoryHash, std::equal_to<>> sModelDirectories;
++
++bool Oot360_IsModelDirectory(std::string_view directory) {
++    return sModelDirectories.find(directory) != sModelDirectories.end();
++}
++} // namespace
++
++// The mods are mounted (the mod menu's InitElement): the archives' files indexed by directory now (Oot360_Prefetch,
++// Oot360_SceneResources), and the directories whose display lists a mod brings told apart by the files' names (the
++// mods' display lists and their vertices and triangles carry "DL" or "vtx", the game's textures don't). Their
++// textures are drawn with the mod's own UVs, so the game's own can't stand in for them while their HD versions load
++// (libultraship's Oot360_LoadTextureNoWait): Djipi's 3DS Experience has 3DS models for most objects and many scenes.
++extern "C" void Oot360_FindModelDirectories(void) {
++    const uint64_t start = __builtin_ppc_get_timebase();
++    for (const auto& [directory, files] : DirectoryIndex()) {
++        if (!directory.starts_with("alt/")) {
++            continue;
++        }
++        for (const auto& f : files) {
++            const std::string_view name = std::string_view(f).substr(f.rfind('/') + 1);
++            if (name.find("DL") != std::string_view::npos || name.find("vtx") != std::string_view::npos ||
++                name.find("Vtx") != std::string_view::npos || name.find("VTX") != std::string_view::npos) {
++                sModelDirectories.insert(directory.substr(4));
++                break;
++            }
++        }
++    }
++    Ship::Oot360_SetOwnTextureTest(Oot360_IsModelDirectory);
++    SPDLOG_INFO("oot360: {} directories with a mod's models, found in {} ms", sModelDirectories.size(),
++                (unsigned)((__builtin_ppc_get_timebase() - start) / 49875));
++}
++
++// Directories never evicted: Link's (adult and child: loaded outside the object lists, their display lists patched by
++// the cosmetics and the tunic and equipment code), the gameplay_*keep objects (held as pointers by the game), the
++// get-item models (drawn anywhere by the randomizer, patched by the cosmetics), and any directory with a patched
++// display list (ResourceManagerHelpers.cpp: the patches live in the cached resource).
++static bool Oot360_AlwaysKept(const std::string& directory) {
++    return directory.starts_with("objects/gameplay_") || directory.starts_with("objects/object_link_") ||
++           directory.starts_with("objects/object_gi_") || Oot360_DirectoryPatched(directory);
++}
++
++// The interface's pictures that only some screens show: the pause menu's item and place names, maps and page titles,
++// the title cards of places and bosses, the file select's and the ending's. The HD packs have them at 4x since test
++// 22 (tools/hdpack/make_hd_patch.py), up to half a megabyte each, and nothing unloaded them any more (game.c): while
++// memory is short they go at a scene change, and load again when a screen shows them.
++static bool Oot360_ShownSometimes(const std::string& directory) {
++    static const char* const kDirectories[] = {
++        "textures/item_name_static",      "textures/map_name_static",        "textures/map_i_static",
++        "textures/map_grand_static",      "textures/map_48x85_static",       "textures/title_static",
++        "textures/nintendo_rogo_static",  "textures/icon_item_field_static", "textures/icon_item_dungeon_static",
++        "textures/icon_item_gameover_static", "textures/icon_item_nes_static", "textures/icon_item_ger_static",
++        "textures/icon_item_fra_static",  "textures/g_pn_",                  "textures/place_title_cards",
++        "textures/object_",               "overlays/ovl_End_Title",
++    };
++    for (const char* prefix : kDirectories) {
++        if (directory.starts_with(prefix)) {
++            return true;
++        }
++    }
++    return false;
++}
++
++// Whether there's memory to load the next scene during the fade out, before the scene change evicts the old ones
++// (Oot360_SceneResources): short of it, the old ones go first.
++extern "C" bool Oot360_RoomToLoadAhead(void) {
++    const unsigned freeKB = Oot360_FreeMemoryKB();
++    return freeKB == 0 || freeKB >= kRoomKB;
++}
++
++extern "C" void Oot360_Prefetch(const char* directory) {
++    if (directory == nullptr || directory[0] == '\0' || !CVarGetInteger("gOot360.Prefetch", 1)) {
++        return;
++    }
++    auto manager = Ship::Context::GetRawInstance()->GetResourceManager();
++    const std::string dir = directory;
++    if (sPrefetched.insert(dir).second) {
++        TheLoader().Add(FilesOf(dir));
++    }
++    if (manager->IsAltAssetsEnabled()) {
++        const std::string alt = "alt/" + dir;
++        if (sPrefetched.insert(alt).second) {
++            TheLoader().Add(FilesOf(alt));
++        }
++    }
++}
++
++// A texture the game sets up by path a while before drawing it: the skies and the rooms painted on a sky's panels
++// (z_vr_box.c, as a scene loads and as the time of day changes the sky). Loaded ahead on the loader threads, and its
++// directory remembered, as Ship of Harkinian no longer unloads every HD texture at each scene change (game.c): the
++// scenes' eviction (Oot360_SceneResources) takes the skies no recent scene set up.
++extern "C" void Oot360_PrefetchTexture(const char* path) {
++    if (path == nullptr || path[0] == '\0') {
++        return;
++    }
++    std::string file = path;
++    if (file.starts_with("__OTR__")) {
++        file.erase(0, 7);
++    }
++    const size_t slash = file.rfind('/');
++    if (slash == std::string::npos) {
++        return;
++    }
++    sTextureDirLastUse[file.substr(0, slash)] = sSceneCount;
++    if (!CVarGetInteger("gOot360.Prefetch", 1)) {
++        return;
++    }
++    // its HD version and the N64 one that stands in while it uploads (the loader's own logic)
++    TheLoader().Add({ file });
++}
++
++static std::string Oot360_ObjectDirectory(s16 id) {
++    if (id > 0 && id < OBJECT_ID_MAX && gObjectTable[id].fileName != nullptr && gObjectTable[id].fileName[0] != '\0') {
++        return std::string("objects/") + gObjectTable[id].fileName;
++    }
++    return std::string();
++}
++
++extern "C" void Oot360_PrefetchObject(s16 id) {
++    const std::string directory = Oot360_ObjectDirectory(id);
++    if (!directory.empty()) {
++        sObjectLastUse[directory] = sSceneCount;
++        Oot360_Prefetch(directory.c_str());
++    }
++}
++
++// The scene's directory, as OTRPlay_SpawnScene (z_play_otr.cpp) names its files.
++static std::string Oot360_SceneDirectory(s32 sceneId) {
++    if (sceneId < 0 || sceneId >= SCENE_ID_MAX || gSceneTable[sceneId].sceneFile.fileName == nullptr) {
++        return std::string();
++    }
++    const bool hasMqVariant = (sceneId >= SCENE_DEKU_TREE && sceneId <= SCENE_ICE_CAVERN) ||
++                              sceneId == SCENE_GERUDO_TRAINING_GROUND || sceneId == SCENE_INSIDE_GANONS_CASTLE;
++    const char* version = !hasMqVariant ? "shared" : (ResourceMgr_IsSceneMasterQuest(sceneId) ? "mq" : "nonmq");
++    return StringHelper::Sprintf("scenes/%s/%s", version, gSceneTable[sceneId].sceneFile.fileName);
++}
++
++// A transition to another scene has begun (z_play.c, TRANS_MODE_SETUP): its fade out takes a third of a second or
++// more, time enough for the loaders to read much of the next scene before its first frame (zeldaMM's test 1c: 581
++// resources, 1.1 s, loaded by the render thread in the new scene's first frame).
++extern "C" void Oot360_PrefetchSceneOfEntrance(s32 entrance) {
++    // Short of memory, the old scenes go first, at the scene change, and the new one loads after.
++    if (entrance < 0 || entrance >= ENTR_MAX || !Oot360_RoomToLoadAhead()) {
++        return;
++    }
++    const std::string directory = Oot360_SceneDirectory(gEntranceTable[entrance].scene);
++    if (!directory.empty()) {
++        Oot360_Prefetch(directory.c_str());
++    }
++}
++
++// The objects a room (or the scene, or one of their alternate headers: child or adult, day or night, cutscenes) lists.
++static void Oot360_ListedObjects(const std::shared_ptr<SOH::Scene>& room, std::unordered_set<s16>& ids, int depth) {
++    if (room == nullptr || depth > 4) {
++        return;
++    }
++    for (const auto& cmd : room->commands) {
++        if (cmd == nullptr) {
++            continue;
++        }
++        if (cmd->cmdId == SOH::SceneCommandID::SetObjectList) {
++            for (s16 id : std::static_pointer_cast<SOH::SetObjectList>(cmd)->objects) {
++                ids.insert(id);
++            }
++        } else if (cmd->cmdId == SOH::SceneCommandID::SetAlternateHeaders) {
++            for (const auto& header : std::static_pointer_cast<SOH::SetAlternateHeaders>(cmd)->headers) {
++                Oot360_ListedObjects(header, ids, depth + 1);
++            }
++        }
++    }
++}
++
++// A scene is about to load (OTRPlay_SpawnScene, in the transition's black screen, before its object lists): evict what
++// the last scenes left, then load the new one: its directory, then the objects its rooms list, waited for. The render
++// thread is waited for before evicting, as it may still draw the last frame from the resources going, and what goes
++// leaves the texture cache with it, as its entries are keyed by the freed textures' addresses.
++extern "C" void Oot360_SceneResources(const char* sceneDirectory) {
++    const std::string scene = sceneDirectory;
++    sSceneCount++;
++    auto it = std::find(sRecentScenes.begin(), sRecentScenes.end(), scene);
++    if (it != sRecentScenes.end()) {
++        sRecentScenes.erase(it);
++    }
++    sRecentScenes.push_back(scene);
++
++    // Old scenes go while memory is short (below kRoomKB), oldest first, and beyond a dozen; when it's low (below
++    // kLowMemoryKB), the objects no scene asked for lately too.
++    const unsigned freeBefore = Oot360_FreeMemoryKB();
++    const unsigned freeKB = freeBefore;
++    const uint64_t evictStart = __builtin_ppc_get_timebase();
++    // What's unloaded is freed only once the render thread's own lookups let go (its next frame), so the count
++    // doesn't move here: one scene a change while short, all but the new one when low.
++    const bool shortOfMemory = freeKB != 0 && freeKB < kRoomKB;
++    const bool low = freeKB != 0 && freeKB < kLowMemoryKB;
++    size_t keep = low ? 1 : std::min(kScenesKept, shortOfMemory ? sRecentScenes.size() - 1 : sRecentScenes.size());
++    keep = std::max<size_t>(keep, 1);
++    std::vector<std::string> going;
++    while (sRecentScenes.size() > keep) {
++        const std::string old = sRecentScenes.front();
++        sRecentScenes.erase(sRecentScenes.begin());
++        if (!Oot360_AlwaysKept(old)) {
++            going.push_back(old);
++        }
++    }
++    // Scenes loaded during a fade out and never entered (an entrance the game changed after, or the randomizer's
++    // shuffled ones): no list above holds them.
++    for (const auto& d : sPrefetched) {
++        if (d.starts_with("scenes/") && std::find(sRecentScenes.begin(), sRecentScenes.end(), d) == sRecentScenes.end() &&
++            !Oot360_AlwaysKept(d) && std::find(going.begin(), going.end(), d) == going.end()) {
++            going.push_back(d);
++        }
++    }
++    if (low) {
++        // The objects of the scene just left were asked for at sSceneCount - 1; older ones go.
++        for (auto obj = sObjectLastUse.begin(); obj != sObjectLastUse.end();) {
++            if (obj->second + 1 < sSceneCount && !Oot360_AlwaysKept(obj->first)) {
++                going.push_back(obj->first);
++                obj = sObjectLastUse.erase(obj);
++            } else {
++                ++obj;
++            }
++        }
++    }
++    // The skies and painted rooms (a few megabytes each in HD) no scene set up lately: while memory is short, those the
++    // scene just left didn't use (the next one sets its own up after this, from its scene commands); else those of
++    // scenes beyond the dozen kept.
++    for (auto dir = sTextureDirLastUse.begin(); dir != sTextureDirLastUse.end();) {
++        if ((shortOfMemory && dir->second + 1 < sSceneCount) || dir->second + kScenesKept < sSceneCount) {
++            going.push_back(dir->first);
++            dir = sTextureDirLastUse.erase(dir);
++        } else {
++            ++dir;
++        }
++    }
++    if (shortOfMemory) {
++        // by the plain directory, which Oot360_Evict takes with its alt/ one (some exist in the packs only)
++        std::unordered_set<std::string> seen;
++        for (const auto& entry : DirectoryIndex()) {
++            const std::string d = entry.first.starts_with("alt/") ? entry.first.substr(4) : entry.first;
++            if (Oot360_ShownSometimes(d) && seen.insert(d).second) {
++                going.push_back(d);
++            }
++        }
++    }
++    const size_t evicted = going.size();
++    if (evicted != 0) {
++        // Nothing of these half-loaded behind our back: what the loaders haven't started of them is dropped, what
++        // they're loading waited for. Then the render thread, which may still draw from them.
++        std::unordered_set<std::string> dirs;
++        for (const auto& d : going) {
++            dirs.insert(d);
++            dirs.insert("alt/" + d);
++        }
++        auto inGoing = [&dirs](const std::string& path) {
++            const size_t slash = path.rfind('/');
++            return slash != std::string::npos && dirs.count(path.substr(0, slash)) != 0;
++        };
++        TheLoader().Drop(inGoing);
++        TheLoader().WaitRunning(inGoing);
++        Oot360_RenderWait();
++        // and the HD textures the render thread asked for in the background (libultraship's
++        // Oot360_LoadTextureNoWait), so the eviction finds them; after half a second, those not started are dropped
++        // and those under way finish and stay
++        const size_t texturesLoading =
++            Ship::Context::GetRawInstance()->GetResourceManager()->Oot360_SettleTextureLoads(500);
++        if (texturesLoading != 0) {
++            SPDLOG_INFO("oot360: {} HD textures still loading at the eviction", texturesLoading);
++        }
++        // What goes leaves the interpreter's texture cache with it; the rest stays there.
++        std::vector<std::pair<uintptr_t, uintptr_t>> memory;
++        size_t resources = 0;
++        for (const auto& d : going) {
++            resources += Oot360_Evict(d, memory);
++        }
++        ZeldaMM_TextureCacheDeleteRanges(memory);
++        // This thread's own lookups let what went go now, not after the next scene has loaded on top of it.
++        Oot360_SyncResourceCaches();
++        OOT360_MEM("after evicting");
++        SPDLOG_INFO("oot360: scene {}: {} resources of {} directories evicted in {} ms (free was {} KB)", scene,
++                    resources, evicted, (unsigned)((__builtin_ppc_get_timebase() - evictStart) / 49875), freeBefore);
++    }
++    // The scene's first second and a half, fading in from black: its HD textures go to the GPU then, up to 12 ms a
++    // frame (libultraship's interpreter.cpp; no frame is drawn while this waits below)
++    Oot360_BoostHdImports(90);
++    if (!CVarGetInteger("gOot360.Prefetch", 1)) {
++        return;
++    }
++    // Up to 1.2 s of the black screen: what isn't loaded by then goes on loading behind the first frames, and the
++    // render thread loads what they need itself, a stutter each time (zeldaMM's test 1h: 200-1600 files left at 0.7 s,
++    // frames of 30-540 ms after). The music goes on meanwhile (Oot360_KeepAudioGoing).
++    const uint64_t start = __builtin_ppc_get_timebase();
++    const uint64_t deadline = start + 1200ull * 49875ull;
++    Oot360_Prefetch(sceneDirectory);
++    TheLoader().WaitUntil(deadline, Oot360_KeepAudioGoing);
++    // The rooms are loaded now: their object lists, all of them, loaded too.
++    auto manager = Ship::Context::GetRawInstance()->GetResourceManager();
++    std::unordered_set<s16> ids;
++    for (const auto& f : FilesOf(scene)) {
++        auto res = manager->GetCachedResource(f, true);
++        if (res != nullptr && res->GetInitData()->Type == static_cast<uint32_t>(SOH::ResourceType::SOH_Room)) {
++            Oot360_ListedObjects(std::static_pointer_cast<SOH::Scene>(res), ids, 0);
++        }
++    }
++    for (s16 id : ids) {
++        Oot360_PrefetchObject(id);
++    }
++    const size_t left = TheLoader().WaitUntil(deadline, Oot360_KeepAudioGoing);
++    SPDLOG_INFO("oot360: scene {} and {} objects loaded in {} ms ({} files still loading)", scene, ids.size(),
++                (unsigned)((__builtin_ppc_get_timebase() - start) / 49875), left);
++}
++#endif
++
+ extern "C" Sprite* GetSeedTexture(uint8_t index) {
+     return OTRGlobals::Instance->gRandoContext->GetSeedTexture(index);
+ }
+@@ -2449,6 +3512,9 @@ extern "C" void EntranceTracker_SetLastEntranceOverride(s16 entranceIndex) {
  }
  
  extern "C" void Gfx_RegisterBlendedTexture(const char* name, u8* mask, u8* replacement) {
@@ -604,7 +1676,7 @@ index 67bd1777..9837491b 100644
      if (auto intP = dynamic_pointer_cast<Fast::Fast3dWindow>(Ship::Context::GetRawInstance()->GetWindow())
                          ->GetInterpreterWeak()
                          .lock()) {
-@@ -2459,6 +2715,9 @@ extern "C" void Gfx_RegisterBlendedTexture(const char* name, u8* mask, u8* repla
+@@ -2459,6 +3525,9 @@ extern "C" void Gfx_RegisterBlendedTexture(const char* name, u8* mask, u8* repla
  }
  
  extern "C" void Gfx_UnregisterBlendedTexture(const char* name) {
@@ -614,7 +1686,7 @@ index 67bd1777..9837491b 100644
      if (auto intP = dynamic_pointer_cast<Fast::Fast3dWindow>(Ship::Context::GetRawInstance()->GetWindow())
                          ->GetInterpreterWeak()
                          .lock()) {
-@@ -2469,6 +2728,9 @@ extern "C" void Gfx_UnregisterBlendedTexture(const char* name) {
+@@ -2469,6 +3538,9 @@ extern "C" void Gfx_UnregisterBlendedTexture(const char* name) {
  }
  
  extern "C" void Gfx_TextureCacheDelete(const uint8_t* texAddr) {
@@ -625,25 +1697,140 @@ index 67bd1777..9837491b 100644
  
      if (texAddr == nullptr) {
 diff --git a/soh/soh/ResourceManagerHelpers.cpp b/soh/soh/ResourceManagerHelpers.cpp
-index 69a482f6..b3cb7e85 100644
+index 69a482f6..6d56f581 100644
 --- a/soh/soh/ResourceManagerHelpers.cpp
 +++ b/soh/soh/ResourceManagerHelpers.cpp
-@@ -371,7 +371,13 @@ extern "C" char* ResourceMgr_LoadPlayerAnimByName(const char* animPath) {
+@@ -213,11 +213,41 @@ extern "C" void ResourceMgr_DirtyDirectory(const char* resName) {
+     Ship::Context::GetRawInstance()->GetResourceManager()->DirtyResources(resName);
+ }
+ 
++#ifdef __XSDK__
++extern "C" void Oot360_RenderWait(void); // OTRGlobals.cpp
++// libultraship's fast/interpreter.cpp (from zeldaMM): the cached textures read from memory in these ranges go
++void ZeldaMM_TextureCacheDeleteRanges(std::vector<std::pair<uintptr_t, uintptr_t>>& ranges);
++#endif
++
+ extern "C" void ResourceMgr_UnloadResource(const char* resName) {
+     std::string path = resName;
+     if (path.substr(0, 7) == "__OTR__") {
+         path = path.substr(7);
+     }
++#ifdef __XSDK__
++    // oot360: a loaded resource goes with the render thread idle (it may draw from it, a frame behind the game) and out
++    // of the interpreter's texture cache too, which has textures by their address: the N64 texture that stood in for an
++    // HD one while it loaded (libultraship's Oot360_LoadTextureNoWait), unloaded by UnloadOriginalWhenAltExists, would
++    // leave its entry behind for another texture at that address to hit. What isn't loaded costs no wait (the 2D rooms
++    // ask each frame).
++    {
++        auto manager = Ship::Context::GetRawInstance()->GetResourceManager();
++        auto resource = manager->GetCachedResource(path, true);
++        if (resource != nullptr) {
++            Oot360_RenderWait();
++            std::vector<std::pair<uintptr_t, uintptr_t>> memory;
++            const uintptr_t start = (uintptr_t)resource->GetRawPointer();
++            const size_t size = resource->GetPointerSize();
++            if (start != 0 && size != 0) {
++                memory.emplace_back(start, start + size);
++            }
++            resource.reset();
++            manager->UnloadResource(path);
++            ZeldaMM_TextureCacheDeleteRanges(memory);
++            return;
++        }
++    }
++#endif
+     auto res = Ship::Context::GetRawInstance()->GetResourceManager()->UnloadResource(path);
+ }
+ 
+@@ -371,7 +401,9 @@ extern "C" char* ResourceMgr_LoadPlayerAnimByName(const char* animPath) {
      return (char*)&anim->limbRotData[0];
  }
  
-+#ifdef __XSDK__
-+extern "C" void Oot360_RenderWait(void);
-+#endif
++extern "C" void Oot360_RenderWait(void); // OTRGlobals.cpp: returns once the render thread has drawn its frame
  extern "C" void ResourceMgr_PushCurrentDirectory(char* path) {
-+#ifdef __XSDK__
 +    Oot360_RenderWait(); // the interpreter on the render thread uses the same directory stack
-+#endif
      Fast::gfx_push_current_dir(path);
  }
  
+@@ -403,9 +435,35 @@ typedef struct {
+ 
+ std::unordered_map<std::string, std::unordered_map<std::string, GfxPatch>> originalGfx;
+ 
++#ifdef __XSDK__
++// oot360 (from zeldaMM): whether a display list under the directory was patched in place (the patches live in the
++// cached resource: evicted and loaded again, it would come back without them, and the unpatch would drop the record).
++// OTRGlobals.cpp's scene changes keep such directories.
++bool Oot360_DirectoryPatched(const std::string& directory) {
++    const std::string prefix = directory + "/";
++    for (const auto& entry : originalGfx) {
++        if (entry.second.empty()) {
++            continue;
++        }
++        std::string_view p = entry.first;
++        if (p.starts_with("__OTR__")) {
++            p.remove_prefix(7);
++        }
++        if (p.starts_with("alt/")) {
++            p.remove_prefix(4);
++        }
++        if (p.starts_with(prefix)) {
++            return true;
++        }
++    }
++    return false;
++}
++#endif
++
+ // Attention! This is primarily for cosmetics & bug fixes. For things like mods and model replacement you should be
+ // using OTRs instead (When that is available). Index can be found using the commented out section below.
+ extern "C" void ResourceMgr_PatchGfxByName(const char* path, const char* patchName, int index, Gfx instruction) {
++    Oot360_RenderWait(); // oot360 (from zeldaMM): the render thread may be running this display list
+     auto res = std::static_pointer_cast<Fast::DisplayList>(
+         Ship::Context::GetRawInstance()->GetResourceManager()->LoadResource(path));
+ 
+@@ -449,6 +507,7 @@ extern "C" void ResourceMgr_PatchGfxByName(const char* path, const char* patchNa
+ 
+ extern "C" void ResourceMgr_PatchGfxCopyCommandByName(const char* path, const char* patchName, int destinationIndex,
+                                                       int sourceIndex) {
++    Oot360_RenderWait(); // oot360 (from zeldaMM): the render thread may be running this display list
+     auto res = std::static_pointer_cast<Fast::DisplayList>(
+         Ship::Context::GetRawInstance()->GetResourceManager()->LoadResource(path));
+ 
+@@ -474,6 +533,7 @@ extern "C" void ResourceMgr_PatchGfxCopyCommandByName(const char* path, const ch
+ }
+ 
+ extern "C" void ResourceMgr_PatchCustomGfxByName(const char* path, const char* patchName, int index, Gfx instruction) {
++    Oot360_RenderWait(); // oot360 (from zeldaMM): the render thread may be running this display list
+     auto res = std::static_pointer_cast<Fast::DisplayList>(
+         Ship::Context::GetRawInstance()->GetResourceManager()->LoadResource(path));
+ 
+@@ -492,6 +552,7 @@ extern "C" void ResourceMgr_PatchCustomGfxByName(const char* path, const char* p
+ }
+ 
+ extern "C" void ResourceMgr_UnpatchGfxByName(const char* path, const char* patchName) {
++    Oot360_RenderWait(); // oot360 (from zeldaMM): the render thread may be running this display list
+     if (originalGfx.contains(path) && originalGfx[path].contains(patchName)) {
+         auto res = std::static_pointer_cast<Fast::DisplayList>(
+             Ship::Context::GetRawInstance()->GetResourceManager()->LoadResource(path));
+diff --git a/soh/soh/SohGui/Menu.cpp b/soh/soh/SohGui/Menu.cpp
+index 642bc54a..c29524b4 100644
+--- a/soh/soh/SohGui/Menu.cpp
++++ b/soh/soh/SohGui/Menu.cpp
+@@ -676,7 +676,12 @@ void Menu::DrawElement() {
+     float centerX = pos.x + windowWidth / 2 - (style.ItemSpacing.x * (menuEntries.size() + 1));
+     std::vector<ImVec2> headerSizes;
+     float headerWidth = 0.0f;
++#ifdef __XSDK__
++    // oot360: no keyboard on the Xbox 360 to type a search with; the controller's navigation stopped on its box
++    const bool headerSearch = false;
++#else
+     bool headerSearch = !CVarGetInteger(CVAR_SETTING("Menu.SidebarSearch"), 0);
++#endif
+     if (headerSearch) {
+         headerWidth += 200.0f;
+     }
 diff --git a/soh/soh/SohGui/SohGui.cpp b/soh/soh/SohGui/SohGui.cpp
-index 986f9337..92e1690a 100644
+index 986f9337..4c89ab7e 100644
 --- a/soh/soh/SohGui/SohGui.cpp
 +++ b/soh/soh/SohGui/SohGui.cpp
 @@ -21,7 +21,9 @@
@@ -697,11 +1884,58 @@ index 986f9337..92e1690a 100644
  }
  
  void RegisterPopup(std::string title, std::string message, std::string button1, std::string button2,
+@@ -335,4 +345,46 @@ void ShowRandomizerSettingsMenu() {
+ void ShowEscMenu() {
+     mSohMenu->Show();
+ }
++
++#ifdef __XSDK__
++// oot360 (from zeldaMM): whether a window is open that reads or changes the game's state while it draws (developer
++// tools, editors, the trackers, which work their logic out as they draw, a pending popup's buttons). Frames are then
++// drawn on the game thread instead of the render thread (OTRGlobals.cpp, Graph_ProcessGfxCommands). Notifications,
++// the item tracker, the stats, the timers and the input viewer only show values and stay on the render thread.
++bool GameStateWindowVisible() {
++    auto gui = Ship::Context::GetRawInstance()->GetWindow()->GetGui();
++    const std::shared_ptr<Ship::GuiWindow> windows[] = {
++        mConsoleWindow,
++        mGfxDebuggerWindow,
++        mModMenuWindow,
++        mAudioEditorWindow,
++        mInputViewerSettings,
++        mCosmeticsEditorWindow,
++        mActorViewerWindow,
++        mColViewerWindow,
++        mSaveEditorWindow,
++        mHookDebuggerWindow,
++        mDLViewerWindow,
++        mValueViewerWindow,
++        mMessageViewerWindow,
++        mCheckTrackerWindow,
++        mCheckTrackerSettingsWindow,
++        mEntranceTrackerWindow,
++        mEntranceTrackerSettingsWindow,
++        mHintTrackerWindow,
++        mHintTrackerSettingsWindow,
++        mItemTrackerSettingsWindow,
++        mTimeSplitsWindow,
++        mTimeSplitSettingsWindow,
++        mPlandomizerWindow,
++        gui->GetGuiWindow("Configure Controller"),
++    };
++    for (const auto& window : windows) {
++        if (window != nullptr && window->IsVisible()) {
++            return true;
++        }
++    }
++    return mModalWindow != nullptr && mModalWindow->PopupsQueued() > 0;
++}
++#endif
+ } // namespace SohGui
 diff --git a/soh/soh/SohGui/SohMenu.cpp b/soh/soh/SohGui/SohMenu.cpp
-index ae098993..4ffaeca5 100644
+index ae098993..37d90f62 100644
 --- a/soh/soh/SohGui/SohMenu.cpp
 +++ b/soh/soh/SohGui/SohMenu.cpp
-@@ -87,7 +87,9 @@ void SohMenu::AddMenuElements() {
+@@ -87,12 +87,16 @@ void SohMenu::AddMenuElements() {
      AddMenuSettings();
      AddMenuEnhancements();
      AddMenuRandomizer();
@@ -710,24 +1944,180 @@ index ae098993..4ffaeca5 100644
 +#endif
      AddMenuDevTools();
  
++#ifndef __XSDK__ // oot360: no keyboard to search with on the Xbox 360 (Menu.cpp hides the header's box too)
      if (CVarGetInteger(CVAR_SETTING("Menu.SidebarSearch"), 0)) {
+         InsertSidebarSearch();
+     }
++#endif
+ 
+     for (auto& initFunc : MenuInit::GetInitFuncs()) {
+         initFunc();
+diff --git a/soh/soh/SohGui/SohMenuDevTools.cpp b/soh/soh/SohGui/SohMenuDevTools.cpp
+index de178da7..3ad696aa 100644
+--- a/soh/soh/SohGui/SohMenuDevTools.cpp
++++ b/soh/soh/SohGui/SohMenuDevTools.cpp
+@@ -40,9 +40,11 @@ void SohMenu::AddMenuDevTools() {
+     AddSidebarEntry("Dev Tools", "General", 3);
+     WidgetPath path = { "Dev Tools", "General", SECTION_COLUMN_1 };
+ 
++#ifndef __XSDK__ // oot360: one screen, no windows on the Xbox 360
+     AddWidget(path, "Popout Menu", WIDGET_CVAR_CHECKBOX)
+         .CVar("gSettings.Menu.Popout")
+         .Options(CheckboxOptions().Tooltip("Changes the menu display from overlay to windowed."));
++#endif
+     AddWidget(path, "Debug Mode", WIDGET_CVAR_CHECKBOX)
+         .CVar(CVAR_DEVELOPER_TOOLS("DebugEnabled"))
+         .Options(
+@@ -77,9 +79,11 @@ void SohMenu::AddMenuDevTools() {
+         .Options(CheckboxOptions().Tooltip("Enables Skulltula Debug, when moving the cursor in the menu above various "
+                                            "map icons (boss key, compass, map screen locations, etc.) will set the GS "
+                                            "bits in that area.\nUSE WITH CAUTION AS IT DOES NOT UPDATE THE GS COUNT!"));
++#ifndef __XSDK__ // oot360: writes every resource loaded as XML to the log: minutes of loading on the Xbox 360
+     AddWidget(path, "Resource logging", WIDGET_CVAR_CHECKBOX)
+         .CVar(CVAR_DEVELOPER_TOOLS("ResourceLogging"))
+         .Options(CheckboxOptions().Tooltip("Logs some resources as XML when they're loaded in binary format."));
++#endif
+ 
+     AddWidget(path, "Frame Advance", WIDGET_CHECKBOX)
+         .Options(CheckboxOptions().Tooltip(
+@@ -151,6 +155,7 @@ void SohMenu::AddMenuDevTools() {
+         .HideInSearch(true)
+         .Options(WindowButtonOptions().Tooltip("Enables the separate Stats Window."));
+ 
++#ifndef __XSDK__ // oot360: the console takes typed commands: no keyboard on the Xbox 360
+     // Console
+     path.sidebarName = "Console";
+     AddSidebarEntry("Dev Tools", path.sidebarName, 1);
+@@ -159,6 +164,7 @@ void SohMenu::AddMenuDevTools() {
+         .WindowName("Console##SoH")
+         .HideInSearch(true)
+         .Options(WindowButtonOptions().Tooltip("Enables the separate Console Window."));
++#endif
+ 
+     // Save Editor
+     path.sidebarName = "Save Editor";
+@@ -169,6 +175,7 @@ void SohMenu::AddMenuDevTools() {
+         .HideInSearch(true)
+         .Options(WindowButtonOptions().Tooltip("Enables the separate Save Editor Window."));
+ 
++#ifndef __XSDK__ // oot360: a tool for Ship of Harkinian's developers
+     // Hook Debugger
+     path.sidebarName = "Hook Debugger";
+     AddSidebarEntry("Dev Tools", path.sidebarName, 1);
+@@ -177,6 +184,7 @@ void SohMenu::AddMenuDevTools() {
+         .WindowName("Hook Debugger")
+         .HideInSearch(true)
+         .Options(WindowButtonOptions().Tooltip("Enables the separate Hook Debugger Window."));
++#endif
+ 
+     // Collision Viewer
+     path.sidebarName = "Collision Viewer";
+@@ -196,6 +204,7 @@ void SohMenu::AddMenuDevTools() {
+         .HideInSearch(true)
+         .Options(WindowButtonOptions().Tooltip("Enables the separate Actor Viewer Window."));
+ 
++#ifndef __XSDK__ // oot360: display lists are looked up by typed name: no keyboard on the Xbox 360
+     // Display List Viewer
+     path.sidebarName = "DList Viewer";
+     AddSidebarEntry("Dev Tools", path.sidebarName, 2);
+@@ -204,6 +213,7 @@ void SohMenu::AddMenuDevTools() {
+         .WindowName("Display List Viewer")
+         .HideInSearch(true)
+         .Options(WindowButtonOptions().Tooltip("Enables the separate Display List Viewer Window."));
++#endif
+ 
+     // Value Viewer
+     path.sidebarName = "Value Viewer";
+@@ -214,6 +224,7 @@ void SohMenu::AddMenuDevTools() {
+         .HideInSearch(true)
+         .Options(WindowButtonOptions().Tooltip("Enables the separate Value Viewer Window."));
+ 
++#ifndef __XSDK__ // oot360: messages are looked up by typed id: no keyboard on the Xbox 360
+     // Message Viewer
+     path.sidebarName = "Message Viewer";
+     AddSidebarEntry("Dev Tools", path.sidebarName, 2);
+@@ -222,7 +233,9 @@ void SohMenu::AddMenuDevTools() {
+         .WindowName("Message Viewer")
+         .HideInSearch(true)
+         .Options(WindowButtonOptions().Tooltip("Enables the separate Message Viewer Window."));
++#endif
+ 
++#ifndef __XSDK__ // oot360: a tool for the renderer's developers (oot360's own is the frame capture, L3+R3)
+     // Gfx Debugger
+     path.sidebarName = "Gfx Debugger";
+     AddSidebarEntry("Dev Tools", path.sidebarName, 1);
+@@ -231,6 +244,7 @@ void SohMenu::AddMenuDevTools() {
+         .WindowName("GfxDebugger##SoH")
+         .HideInSearch(true)
+         .Options(WindowButtonOptions().Tooltip("Enables the separate Gfx Debugger Window."));
++#endif
+ }
+ 
+ } // namespace SohGui
 diff --git a/soh/soh/SohGui/SohMenuSettings.cpp b/soh/soh/SohGui/SohMenuSettings.cpp
-index 476f99f3..eb0f4067 100644
+index 476f99f3..7fafb3d0 100644
 --- a/soh/soh/SohGui/SohMenuSettings.cpp
 +++ b/soh/soh/SohGui/SohMenuSettings.cpp
-@@ -142,7 +142,11 @@ void SohMenu::AddMenuSettings() {
+@@ -14,6 +14,10 @@ extern "C" {
+ #include "variables.h"
+ }
+ 
++#ifdef __XSDK__
++extern "C" unsigned Oot360_FreeMemoryKB(void); // platform/xbox360/MemTrace.c
++#endif
++
+ namespace SohGui {
+ 
+ extern std::shared_ptr<SohMenu> mSohMenu;
+@@ -138,7 +142,18 @@ void SohMenu::AddMenuSettings() {
+                      .Tooltip("Changes the Theme of the Menu Widgets.")
+                      .ComboMap(menuThemeOptions)
+                      .DefaultIndex(Colors::LightBlue));
+-#if not defined(__SWITCH__) and not defined(__WIIU__)
++#if defined(__XSDK__)
++    // oot360 (as zeldaMM): the controller is the only way to work the menu, so its navigation is always on
++    // (OTRGlobals.cpp keeps CVAR_IMGUI_CONTROLLER_NAV at 1: without it Back no longer opens or closes the menu), and
++    // neither it, the background inputs (no other windows) nor the mouse cursor's option is shown.
++    AddWidget(path, "Menu Background Opacity", WIDGET_CVAR_SLIDER_FLOAT)
++        .CVar(CVAR_SETTING("Menu.BackgroundOpacity"))
++        .RaceDisable(false)
++        .Options(FloatSliderOptions().DefaultValue(0.85f).IsPercentage().Tooltip(
++            "Sets the opacity of the background of the port menu."));
++
++    AddWidget(path, "General Settings", WIDGET_SEPARATOR_TEXT);
++#elif not defined(__SWITCH__) and not defined(__WIIU__)
      AddWidget(path, "Menu Controller Navigation", WIDGET_CVAR_CHECKBOX)
          .CVar(CVAR_IMGUI_CONTROLLER_NAV)
          .RaceDisable(false)
-+#ifdef __XSDK__
-+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
-+#else
+@@ -173,6 +188,7 @@ void SohMenu::AddMenuSettings() {
+         })
+         .Options(CheckboxOptions().Tooltip("Makes the cursor always visible, even in full screen."));
+ #endif
++#ifndef __XSDK__ // oot360: no keyboard on the Xbox 360 (the search boxes are hidden, Menu.cpp)
+     AddWidget(path, "Search In Sidebar", WIDGET_CVAR_CHECKBOX)
+         .CVar(CVAR_SETTING("Menu.SidebarSearch"))
+         .RaceDisable(false)
+@@ -190,9 +206,11 @@ void SohMenu::AddMenuSettings() {
+         .RaceDisable(false)
          .Options(CheckboxOptions().Tooltip(
+             "Search input box gets autofocus when visible. Does not affect using other widgets."));
 +#endif
-             "Allows controller navigation of the port menu (Settings, Enhancements,...)\nCAUTION: "
-             "This will disable game inputs while the menu is visible.\n\nD-pad to move between "
-             "items, A to select, B to move up in scope."));
-@@ -233,6 +237,20 @@ void SohMenu::AddMenuSettings() {
+     AddWidget(path, "Reset Button Combination:", WIDGET_CVAR_BTN_SELECTOR)
+         .CVar("gSettings.ResetBtn")
+         .Options(BtnSelectorOptions().DefaultValue(BTN_CUSTOM_MODIFIER2));
++#ifndef __XSDK__ // oot360: no file browser on the Xbox 360
+     AddWidget(path, "Open App Files Folder", WIDGET_BUTTON)
+         .RaceDisable(false)
+         .Callback([](WidgetInfo& info) {
+@@ -200,6 +218,7 @@ void SohMenu::AddMenuSettings() {
+             SDL_OpenURL(std::string("file:///" + std::filesystem::absolute(filesPath).string()).c_str());
+         })
+         .Options(ButtonOptions().Tooltip("Opens the folder that contains the save and mods folders, etc."));
++#endif
+ 
+     AddWidget(path, "Boot", WIDGET_SEPARATOR_TEXT);
+     AddWidget(path, "Boot Sequence", WIDGET_CVAR_COMBOBOX)
+@@ -233,6 +252,15 @@ void SohMenu::AddMenuSettings() {
                       .ComponentAlignment(ComponentAlignments::Right)
                       .ComboMap(languages)
                       .DefaultIndex(LANGUAGE_ENG));
@@ -737,18 +2127,111 @@ index 476f99f3..eb0f4067 100644
 +        .RaceDisable(false)
 +        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
 +            "Textos e fonte da traducao PT-BR (ptbr.o2r ao lado do soh.xex, feito com a ferramenta do oot360 a "
-+            "partir da sua ROM traduzida). Vale a partir da proxima vez que o jogo abrir."));
-+    AddWidget(path, "Xbox 360: desenho em paralelo (mais rapido)", WIDGET_CVAR_CHECKBOX)
-+        .CVar("gOot360.RenderThread")
-+        .RaceDisable(false)
-+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
-+            "Desenha cada quadro num nucleo separado enquanto o jogo calcula o proximo. Desligue se notar "
-+            "objetos tremendo ou piscando."));
++            "partir da sua ROM traduzida). Vale a partir da proxima vez que o jogo abrir.\n\nPortuguese (Brazil) "
++            "text from ptbr.o2r next to soh.xex. Takes effect at the next start."));
 +#endif
      AddWidget(path, "Accessibility", WIDGET_SEPARATOR_TEXT);
  #if defined(_WIN32) || defined(__APPLE__) || defined(ESPEAK)
      AddWidget(path, "Text to Speech", WIDGET_CVAR_CHECKBOX)
-@@ -334,10 +352,12 @@ void SohMenu::AddMenuSettings() {
+@@ -283,6 +311,80 @@ void SohMenu::AddMenuSettings() {
+         AddWidget(path, GetGameVersionString(i), WIDGET_TEXT);
+     }
+ 
++#ifdef __XSDK__
++    // oot360: the console's own settings, in one place (they were spread over General and Graphics, or only in the
++    // config file)
++    path.sidebarName = "Xbox 360";
++    path.column = SECTION_COLUMN_1;
++    AddSidebarEntry("Settings", path.sidebarName, 2);
++    AddWidget(path, "Desempenho / Performance", WIDGET_SEPARATOR_TEXT);
++    AddWidget(path, "Desenho em paralelo (mais rapido)", WIDGET_CVAR_CHECKBOX)
++        .CVar("gOot360.RenderThread")
++        .RaceDisable(false)
++        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
++            "Desenha cada quadro num nucleo separado enquanto o jogo calcula o proximo. Desligue se notar objetos "
++            "tremendo ou piscando.\n\nDraws each frame on a core of its own while the game works out the next."));
++    AddWidget(path, "Carregar areas antes (menos engasgos)", WIDGET_CVAR_CHECKBOX)
++        .CVar("gOot360.Prefetch")
++        .RaceDisable(false)
++        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
++            "Le os arquivos de cada area, dos seus objetos e do ceu em segundo plano quando o jogo pede a area (e "
++            "durante o escurecimento da troca de area), em vez de no meio do quadro que os desenha.\n\nLoads each "
++            "area's, its objects' and its sky's files in the background when the game asks for the area."));
++    AddWidget(path, "Texturas HD por quadro: %d ms", WIDGET_CVAR_SLIDER_INT)
++        .CVar("gOot360.HdUploadMs")
++        .RaceDisable(false)
++        .Options(IntSliderOptions().Min(1).Max(8).DefaultValue(2).Tooltip(
++            "Quanto de cada quadro pode ir para preparar texturas HD novas. Menos: menos engasgos, e a textura "
++            "original aparece por um instante antes da HD. Mais: as HD aparecem antes, com mais risco de engasgo ao "
++            "entrar em areas novas. 2 e o padrao.\n\nHow much of each frame may go to new HD textures (the original "
++            "one stands in meanwhile). 2 is the default."));
++    AddWidget(path, "Memoria livre", WIDGET_CUSTOM)
++        .CustomFunction([](WidgetInfo& info) {
++            ImGui::Text("Memoria livre / free memory: %u MB", Oot360_FreeMemoryKB() / 1024);
++        })
++        .HideInSearch(true);
++    AddWidget(path, "Mostrar FPS (janela Stats)", WIDGET_WINDOW_BUTTON)
++        .CVar(CVAR_WINDOW("SohStats"))
++        .RaceDisable(false)
++        .WindowName("Stats##Soh")
++        .HideInSearch(true)
++        .Options(WindowButtonOptions()
++                     .Tooltip("Abre a janela de estatisticas do Ship of Harkinian (quadros por segundo), a mesma de "
++                              "Dev Tools > Stats; ela fica na tela com o menu fechado.\n\nThe Stats window (frames "
++                              "per second), as in Dev Tools > Stats; it stays up with the menu closed.")
++                     .EmbedWindow(false));
++
++    path.column = SECTION_COLUMN_2;
++    AddWidget(path, "Imagem / Picture", WIDGET_SEPARATOR_TEXT);
++    AddWidget(path, "Antisserrilhado (FXAA)", WIDGET_CVAR_CHECKBOX)
++        .CVar("gOot360.Fxaa")
++        .RaceDisable(false)
++        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
++            "Suaviza as bordas serrilhadas de objetos e cenarios (FXAA) durante o jogo. Textos, icones e menus ficam "
++            "nitidos: sao desenhados depois. Pesa pouco no processador grafico. So funciona com a resolucao interna "
++            "em 100% (o padrao).\n\nSmooths jagged edges (FXAA) in gameplay; text, icons and menus stay sharp (drawn "
++            "after it). Only at 100% internal resolution (the default)."));
++    AddWidget(path, "Texturas suaves a distancia (mipmaps)", WIDGET_CVAR_CHECKBOX)
++        .CVar("gOot360.Mipmaps")
++        .RaceDisable(false)
++        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
++            "Texturas vistas de longe ou desenhadas menores (icones, coracoes, chao ao longe) sem serrilhado nem "
++            "cintilacao.\n\nMip levels: distant and small textures without jaggies or shimmer."));
++    AddWidget(path, "Filtro anisotropico", WIDGET_CVAR_SLIDER_INT)
++        .CVar("gOot360.Anisotropy")
++        .RaceDisable(false)
++        .Options(IntSliderOptions().Min(0).Max(16).DefaultValue(4).Tooltip(
++            "Nitidez do chao e das paredes vistos de lado (0 desliga; 4 e o padrao). Vale para as texturas com "
++            "mipmaps.\n\nAnisotropic filtering for surfaces seen at a slant (0 off)."));
++    AddWidget(path, "Cores do Xbox nos botoes A e B dos textos", WIDGET_CVAR_CHECKBOX)
++        .CVar("gOot360.XboxButtons")
++        .RaceDisable(false)
++        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
++            "Desenha os simbolos dos botoes A e B nos textos do jogo em verde e vermelho, como no controle do Xbox "
++            "360.\n\nThe A and B button symbols in the game's text in the Xbox 360 controller's green and red."));
++#endif
++
+     // Audio Settings
+     path.sidebarName = "Audio";
+     path.column = SECTION_COLUMN_1;
+@@ -323,10 +425,16 @@ void SohMenu::AddMenuSettings() {
+         .Callback([](WidgetInfo& info) {
+             Audio_SetGameVolume(SEQ_PLAYER_SFX, ((float)CVarGetInteger(CVAR_SETTING("Volume.SFX"), 100) / 100.0f));
+         });
++#ifndef __XSDK__ // oot360: one audio backend on the Xbox 360
+     AddWidget(path, "Audio API (Needs reload)", WIDGET_AUDIO_BACKEND).RaceDisable(false);
++#endif
+ 
+     // Graphics Settings
++#ifdef __XSDK__
++    static int32_t maxFps = 60; // oot360: the television's 60 Hz is the most the Xbox 360 shows
++#else
+     static int32_t maxFps = 360;
++#endif
+     const char* tooltip =
+         "Uses Matrix Interpolation to create extra frames, resulting in smoother graphics. This is "
+         "purely visual and does not impact game logic, execution of glitches, etc.\n\nA higher target "
+@@ -334,10 +442,12 @@ void SohMenu::AddMenuSettings() {
      path.sidebarName = "Graphics";
      AddSidebarEntry("Settings", "Graphics", 3);
      AddWidget(path, "Graphics Options", WIDGET_SEPARATOR_TEXT);
@@ -761,7 +2244,7 @@ index 476f99f3..eb0f4067 100644
      AddWidget(path, "Internal Resolution", WIDGET_CVAR_SLIDER_FLOAT)
          .CVar(CVAR_INTERNAL_RESOLUTION)
          .RaceDisable(false)
-@@ -361,8 +381,13 @@ void SohMenu::AddMenuSettings() {
+@@ -361,8 +471,13 @@ void SohMenu::AddMenuSettings() {
                  .ShowButtons(false)
                  .IsPercentage()
                  .Min(0.5f)
@@ -776,8 +2259,25 @@ index 476f99f3..eb0f4067 100644
      AddWidget(path, "Anti-aliasing (MSAA)", WIDGET_CVAR_SLIDER_INT)
          .CVar(CVAR_MSAA_VALUE)
          .RaceDisable(false)
-@@ -427,7 +452,16 @@ void SohMenu::AddMenuSettings() {
+@@ -401,6 +516,7 @@ void SohMenu::AddMenuSettings() {
+         .CVar(CVAR_SETTING("MatchRefreshRate"))
+         .RaceDisable(false)
+         .Options(CheckboxOptions().Tooltip("Matches interpolation value to the refresh rate of your display."));
++#ifndef __XSDK__ // oot360: one renderer, the television's vsync and no windows on the Xbox 360
+     AddWidget(path, "Renderer API (Needs reload)", WIDGET_VIDEO_BACKEND).RaceDisable(false);
+     AddWidget(path, "Enable Vsync", WIDGET_CVAR_CHECKBOX)
+         .CVar(CVAR_VSYNC_ENABLED)
+@@ -424,10 +540,25 @@ void SohMenu::AddMenuSettings() {
+         .Options(CheckboxOptions()
+                      .Tooltip("Allows multiple windows to be opened at once. Requires a reload to take effect.")
+                      .DefaultValue(true));
++#endif
++#ifdef __XSDK__
++    // oot360: the Xbox 360 build applies a new filter itself, a moment after the change (OTRGlobals.cpp)
++    AddWidget(path, "Texture Filter", WIDGET_CVAR_COMBOBOX)
++#else
      AddWidget(path, "Texture Filter (Needs reload)", WIDGET_CVAR_COMBOBOX)
++#endif
          .CVar(CVAR_TEXTURE_FILTER)
          .RaceDisable(false)
 +#ifdef __XSDK__
@@ -837,10 +2337,10 @@ index 00000000..60178a3c
 +#endif
 diff --git a/soh/soh/platform/xbox360/MemTrace.c b/soh/soh/platform/xbox360/MemTrace.c
 new file mode 100644
-index 00000000..fadc4f28
+index 00000000..fb2ef19c
 --- /dev/null
 +++ b/soh/soh/platform/xbox360/MemTrace.c
-@@ -0,0 +1,224 @@
+@@ -0,0 +1,243 @@
 +#ifdef __XSDK__
 +// Memory diagnostics for the Xbox 360 build: the link wraps malloc, calloc, realloc and memalign
 +// (soh/CMakeLists.txt, -Wl,--wrap=...) and this logs every allocation of 2 MB or more, and every failure, with the
@@ -879,7 +2379,21 @@ index 00000000..fadc4f28
 +    sInTrace = 0;
 +}
 +
-+static void Note(const char* what, size_t size, void* result, void* r0, void* r1, void* r2, void* r3) {
++// oot360 (from zeldaMM): the title's free memory in KB (the pages the kernel has left: malloc's arena and the GPU's
++// pools both grow from them), or 0 if unknown. Scene changes evict resources below a threshold (OTRGlobals.cpp,
++// Oot360_SceneResources).
++// malloc keeps what it was given: memory freed in its arena (mallinfo's fordblks) is free for the game too, though the
++// kernel's count doesn't show it.
++unsigned Oot360_FreeMemoryKB(void) {
++    MM_QUERY_STATISTICS_RESULT st = { .size = sizeof(st) };
++    if (NT_SUCCESS(MmQueryStatistics(&st))) {
++        struct mallinfo mi = mallinfo();
++        return (unsigned)(st.title.available_pages * 4) + (unsigned)(mi.fordblks >> 10);
++    }
++    return 0;
++}
++
++static void NoteAllocation(const char* what, size_t size, void* result, void* r0, void* r1, void* r2, void* r3) {
 +    if (sInTrace) {
 +        return;
 +    }
@@ -892,24 +2406,29 @@ index 00000000..fadc4f28
 +}
 +
 +// The heap's span as malloc has handed it out, so pointers into it can be told from N64 segment addresses
-+// (Oot360_IsHeapAddress, used by the Fast3D interpreter in place of dladdr). Races only widen it late.
-+static volatile uintptr_t sHeapLow = UINTPTR_MAX;
-+static volatile uintptr_t sHeapHigh = 0;
++// (Oot360_IsHeapAddress, used by the Fast3D interpreter in place of dladdr). Threads allocate at once, so the bounds
++// only ever move outwards, by compare-and-swap: a plain store could put back a narrower bound another thread had just
++// widened, and textures in between would be dropped until the next allocation there.
++static uintptr_t sHeapLow = UINTPTR_MAX;
++static uintptr_t sHeapHigh = 0;
 +
 +static inline void Span(void* p, size_t size) {
 +    if (p) {
 +        const uintptr_t a = (uintptr_t)p;
-+        if (a < sHeapLow) {
-+            sHeapLow = a;
++        const uintptr_t end = a + size;
++        uintptr_t low = __atomic_load_n(&sHeapLow, __ATOMIC_RELAXED);
++        while (a < low && !__atomic_compare_exchange_n(&sHeapLow, &low, a, 1, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
 +        }
-+        if (a + size > sHeapHigh) {
-+            sHeapHigh = a + size;
++        uintptr_t high = __atomic_load_n(&sHeapHigh, __ATOMIC_RELAXED);
++        while (end > high &&
++               !__atomic_compare_exchange_n(&sHeapHigh, &high, end, 1, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
 +        }
 +    }
 +}
 +
 +int Oot360_IsHeapAddress(uintptr_t address) {
-+    return address >= sHeapLow && address < sHeapHigh;
++    return address >= __atomic_load_n(&sHeapLow, __ATOMIC_RELAXED) &&
++           address < __atomic_load_n(&sHeapHigh, __ATOMIC_RELAXED);
 +}
 +
 +// PowerPC frames keep a back chain, so the callers a few frames up can be read.
@@ -920,7 +2439,7 @@ index 00000000..fadc4f28
 +    void* p = __real_malloc(size);
 +    Span(p, size);
 +    if (size >= OOT360_BIG_ALLOCATION || !p) {
-+        Note("malloc", size, p, CALLERS);
++        NoteAllocation("malloc", size, p, CALLERS);
 +    }
 +    return p;
 +}
@@ -929,7 +2448,7 @@ index 00000000..fadc4f28
 +    void* p = __real_calloc(count, size);
 +    Span(p, count * size);
 +    if (count * size >= OOT360_BIG_ALLOCATION || !p) {
-+        Note("calloc", count * size, p, CALLERS);
++        NoteAllocation("calloc", count * size, p, CALLERS);
 +    }
 +    return p;
 +}
@@ -938,7 +2457,7 @@ index 00000000..fadc4f28
 +    void* p = __real_realloc(ptr, size);
 +    Span(p, size);
 +    if (size >= OOT360_BIG_ALLOCATION || (!p && size)) {
-+        Note("realloc", size, p, CALLERS);
++        NoteAllocation("realloc", size, p, CALLERS);
 +    }
 +    return p;
 +}
@@ -947,7 +2466,7 @@ index 00000000..fadc4f28
 +    void* p = __real_memalign(align, size);
 +    Span(p, size);
 +    if (size >= OOT360_BIG_ALLOCATION || !p) {
-+        Note("memalign", size, p, CALLERS);
++        NoteAllocation("memalign", size, p, CALLERS);
 +    }
 +    return p;
 +}
@@ -1065,6 +2584,23 @@ index 00000000..fadc4f28
 +    return r;
 +}
 +#endif
+diff --git a/soh/soh/resource/importer/AudioSoundFontFactory.cpp b/soh/soh/resource/importer/AudioSoundFontFactory.cpp
+index 4ef73e06..ad1877e6 100644
+--- a/soh/soh/resource/importer/AudioSoundFontFactory.cpp
++++ b/soh/soh/resource/importer/AudioSoundFontFactory.cpp
+@@ -410,8 +410,10 @@ std::vector<AdsrEnvelope> SOH::ResourceFactoryXMLSoundFontV0::ParseEnvelopes(Aud
+             .delay = (s16)element->IntAttribute("Delay"),
+             .arg = (s16)element->IntAttribute("Arg"),
+         };
+-        env.delay = BSWAP16(env.delay);
+-        env.arg = BSWAP16(env.arg);
++        // Stored big-endian, as the game's envelope reader takes them: swapped on little-endian hosts only (oot360,
++        // as zeldaMM: BSWAP16 here swapped them on the big-endian Xbox 360 too, as the binary path above does not).
++        env.delay = BE16SWAP(env.delay);
++        env.arg = BE16SWAP(env.arg);
+         envelopes.emplace_back(env);
+         element = element->NextSiblingElement("Envelope");
+         total++;
 diff --git a/soh/soh/z_message_OTR.cpp b/soh/soh/z_message_OTR.cpp
 index 1d2a70cf..aeca7e28 100644
 --- a/soh/soh/z_message_OTR.cpp
@@ -1146,8 +2682,58 @@ index 1d2a70cf..aeca7e28 100644
  
      return table;
  }
+diff --git a/soh/soh/z_play_otr.cpp b/soh/soh/z_play_otr.cpp
+index 78c637b7..ddec9dd2 100644
+--- a/soh/soh/z_play_otr.cpp
++++ b/soh/soh/z_play_otr.cpp
+@@ -16,6 +16,9 @@ extern "C" void Play_InitScene(PlayState* play, s32 spawn);
+ extern "C" void Play_InitEnvironment(PlayState* play, s16 skyboxId);
+ void OTRPlay_InitScene(PlayState* play, s32 spawn);
+ s32 OTRScene_ExecuteCommands(PlayState* play, SOH::Scene* scene);
++#ifdef __XSDK__
++extern "C" void Oot360_SceneResources(const char* sceneDirectory); // OTRGlobals.cpp
++#endif
+ 
+ // LUS::OTRResource* OTRPlay_LoadFile(PlayState* play, RomFile* file) {
+ Ship::IResource* OTRPlay_LoadFile(PlayState* play, const char* fileName) {
+@@ -44,6 +47,13 @@ extern "C" void OTRPlay_SpawnScene(PlayState* play, s32 sceneId, s32 spawn) {
+     std::string scenePath = StringHelper::Sprintf("scenes/%s/%s/%s", sceneVersion.c_str(), scene->sceneFile.fileName,
+                                                   scene->sceneFile.fileName);
+ 
++#ifdef __XSDK__
++    // oot360 (from zeldaMM): what the last scenes left evicted as memory needs, then this scene's directory and the
++    // objects its rooms list loaded ahead on the loader threads, waited for in the transition's black screen
++    // (OTRGlobals.cpp)
++    Oot360_SceneResources(
++        StringHelper::Sprintf("scenes/%s/%s", sceneVersion.c_str(), scene->sceneFile.fileName).c_str());
++#endif
+     play->sceneSegment = OTRPlay_LoadFile(play, scenePath.c_str());
+ 
+     // Failed to load scene... default to doodongs cavern
+diff --git a/soh/soh/z_scene_otr.cpp b/soh/soh/z_scene_otr.cpp
+index 72e2f063..e2b92bcb 100644
+--- a/soh/soh/z_scene_otr.cpp
++++ b/soh/soh/z_scene_otr.cpp
+@@ -137,9 +137,17 @@ bool Scene_CommandMeshHeader(PlayState* play, SOH::ISceneCommand* cmd) {
+ 
+ extern "C" void* func_800982FC(ObjectContext* objectCtx, s32 bankIndex, s16 objectId);
+ 
++#ifdef __XSDK__
++extern "C" void Oot360_PrefetchObject(s16 id); // OTRGlobals.cpp
++#endif
++
+ bool OTRfunc_800982FC(ObjectContext* objectCtx, s32 bankIndex, s16 objectId) {
+ 
+     objectCtx->status[bankIndex].id = -objectId;
++#ifdef __XSDK__
++    // oot360 (from zeldaMM): loaded ahead on the loader threads, as the room's actors use it next
++    Oot360_PrefetchObject(objectId);
++#endif
+ 
+     return false;
+ }
 diff --git a/soh/src/code/game.c b/soh/src/code/game.c
-index 8505d5e8..86a49e3a 100644
+index 8505d5e8..b7102d73 100644
 --- a/soh/src/code/game.c
 +++ b/soh/src/code/game.c
 @@ -29,6 +29,9 @@ GameState* gGameState;
@@ -1180,6 +2766,95 @@ index 8505d5e8..86a49e3a 100644
      osSyncPrintf("game デストラクタ開始\n"); // "game destructor start"
      func_800C3C20();
      Audio_Update();
+@@ -491,10 +500,18 @@ void GameState_Destroy(GameState* gameState) {
+     // patching system.
+     ResourceMgr_ClearSkeletons();
+ 
++#ifndef __XSDK__
+     if (ResourceMgr_IsAltAssetsEnabled()) {
+         ResourceUnloadDirectory("alt/*");
+         gfx_texture_cache_clear();
+     }
++#else
++    // oot360 (from zeldaMM): not every alt/ resource at each game state's end, that is each scene change: the HD
++    // textures and the model mods' display lists (Link's, the interface's) read, parsed and uploaded again for every
++    // scene, the stutter of each scene's first seconds. Old scenes and objects are evicted as memory needs instead, at
++    // the next scene's load (soh/OTRGlobals.cpp, Oot360_SceneResources), and what goes leaves the texture cache with
++    // it.
++#endif
+ }
+ 
+ GameStateFunc GameState_GetInit(GameState* gameState) {
+diff --git a/soh/src/code/graph.c b/soh/src/code/graph.c
+index 4190955a..a422a094 100644
+--- a/soh/src/code/graph.c
++++ b/soh/src/code/graph.c
+@@ -90,6 +90,12 @@ void Graph_DisassembleUCode(Gfx* workBuf) {
+ #endif
+ }
+ 
++#ifdef __XSDK__
++#include <xsdk/log.h>
++// oot360: set by Play_Draw for the frame being built when FXAA should run before its overlay (see Graph_Update)
++s32 gOot360FxaaBeforeOverlay = false;
++#endif
++
+ void Graph_UCodeFaultClient(Gfx* workBuf) {
+ #if 0
+     UCodeDisas disassembler;
+@@ -309,6 +315,14 @@ void Graph_Update(GraphicsContext* gfxCtx, GameState* gameState) {
+ 
+     gSPBranchList(WORK_DISP++, gfxCtx->polyOpaBuffer);
+     gSPBranchList(POLY_OPA_DISP++, gfxCtx->polyXluBuffer);
++#ifdef __XSDK__
++    // oot360 (from zeldaMM): FXAA's place, between the world and the overlay (the interface, text boxes, fades), for a
++    // play frame that draws the world (Play_Draw sets the flag): libultraship's interpreter runs the pass at this tag.
++    if (gOot360FxaaBeforeOverlay) {
++        gDPNoOpTag3(POLY_XLU_DISP++, 0xF1, 0, 0x4641);
++    }
++    gOot360FxaaBeforeOverlay = false;
++#endif
+     gSPBranchList(POLY_XLU_DISP++, gfxCtx->overlayBuffer);
+     gDPPipeSync(OVERLAY_DISP++);
+     gDPFullSync(OVERLAY_DISP++);
+@@ -382,6 +396,37 @@ void Graph_Update(GraphicsContext* gfxCtx, GameState* gameState) {
+         // "Zelda 4 is dead"
+         osSyncPrintf(VT_COL(RED, WHITE) "ゼルダ4は死んでしまった(graph_alloc is empty)\n" VT_RST);
+     }
++#ifdef __XSDK__
++    {
++        // oot360: the most each of the frame's buffers took (z64.h's smaller pools), every 1200 frames, and how many
++        // frames ran out of one (not drawn, as on the N64)
++        static u32 sPeakKB[3];
++        static u32 sFrames;
++        static u32 sRanOut;
++        TwoHeadGfxArena* arenas[3] = { &gfxCtx->polyOpa, &gfxCtx->polyXlu, &gfxCtx->overlay };
++        s32 i;
++
++        for (i = 0; i < 3; i++) {
++            const u32 usedKB = (u32)(arenas[i]->size - THGA_GetSize(arenas[i])) >> 10;
++
++            if (usedKB > sPeakKB[i]) {
++                sPeakKB[i] = usedKB;
++            }
++        }
++        if (problem) {
++            sRanOut++;
++        }
++        if (++sFrames == 1200 || (problem && sRanOut == 1)) {
++            xsdk_log_write("graph: most a frame took: opa %u KB, xlu %u KB, overlay %u KB of %u KB each; %u frames ran "
++                           "out",
++                           (unsigned)sPeakKB[0], (unsigned)sPeakKB[1], (unsigned)sPeakKB[2],
++                           (unsigned)(sizeof(gGfxPools[0].polyOpaBuffer) >> 10), (unsigned)sRanOut);
++            if (sFrames == 1200) {
++                sFrames = 0;
++            }
++        }
++    }
++#endif
+ 
+     if (!problem) {
+         Graph_TaskSet00(gfxCtx);
 diff --git a/soh/src/code/main.c b/soh/src/code/main.c
 index 4e68d5da..992adb50 100644
 --- a/soh/src/code/main.c
@@ -1258,6 +2933,115 @@ index 4e68d5da..992adb50 100644
  void Main(void* arg) {
      IrqMgrClient irqClient;
      OSMesgQueue irqMgrMsgQ;
+diff --git a/soh/src/code/z_actor.c b/soh/src/code/z_actor.c
+index 77c5abce..f5fd82a8 100644
+--- a/soh/src/code/z_actor.c
++++ b/soh/src/code/z_actor.c
+@@ -24,6 +24,67 @@
+ #include <assert.h>
+ #include <libultraship/bridge/consolevariablebridge.h>
+ 
++#ifdef __XSDK__
++#include <stdio.h>
++#include <xsdk/log.h>
++// oot360 (from zeldaMM): the game thread's time per kind of actor, its update and its draw, logged every 200 game
++// frames (about 10 s; Oot360_LogActorTimes, from Play_Main): which actors a scene's slow frames go to. Only the game
++// thread touches these.
++#define OOT360_ACTOR_IDS 0x200
++static u64 sOot360ActorUpdateTicks[OOT360_ACTOR_IDS];
++static u64 sOot360ActorDrawTicks[OOT360_ACTOR_IDS];
++static u32 sOot360ActorUpdates[OOT360_ACTOR_IDS];
++
++static void Oot360_LogTopActors(const char* what, u64* ticks, u32 frames) {
++    char line[400];
++    u64 total = 0;
++    s32 id;
++    s32 k;
++    s32 n;
++    u32 totalHundredths;
++
++    for (id = 0; id < OOT360_ACTOR_IDS; id++) {
++        total += ticks[id];
++    }
++    // the time base runs at 49.875 MHz; hundredths of a millisecond
++    totalHundredths = (u32)(total * 100 / 49875 / frames);
++    n = snprintf(line, sizeof(line), "oot360: actors' %s, ms a game frame: all %u.%02u;", what,
++                 (unsigned)(totalHundredths / 100), (unsigned)(totalHundredths % 100));
++    for (k = 0; k < 6; k++) {
++        s32 best = -1;
++        u32 hundredths;
++
++        for (id = 0; id < OOT360_ACTOR_IDS; id++) {
++            if (ticks[id] != 0 && (best < 0 || ticks[id] > ticks[best])) {
++                best = id;
++            }
++        }
++        if (best < 0) {
++            break;
++        }
++        hundredths = (u32)(ticks[best] * 100 / 49875 / frames);
++        if (n < (s32)sizeof(line) - 40) {
++            n += snprintf(line + n, sizeof(line) - n, " 0x%03X %u.%02u (%u)", (unsigned)best,
++                          (unsigned)(hundredths / 100), (unsigned)(hundredths % 100),
++                          (unsigned)(sOot360ActorUpdates[best] / frames));
++        }
++        ticks[best] = 0;
++    }
++    xsdk_log_write("%s", line);
++}
++
++void Oot360_LogActorTimes(u32 frames) {
++    if (frames == 0) {
++        return;
++    }
++    Oot360_LogTopActors("updates", sOot360ActorUpdateTicks, frames);
++    Oot360_LogTopActors("draws", sOot360ActorDrawTicks, frames);
++    memset(sOot360ActorUpdateTicks, 0, sizeof(sOot360ActorUpdateTicks));
++    memset(sOot360ActorDrawTicks, 0, sizeof(sOot360ActorDrawTicks));
++    memset(sOot360ActorUpdates, 0, sizeof(sOot360ActorUpdates));
++}
++#endif
++
+ #if defined(_MSC_VER) || defined(__GNUC__)
+ #include "textures/place_title_cards/g_pn_49.h"
+ #include "textures/place_title_cards/g_pn_01.h"
+@@ -2694,8 +2755,19 @@ void Actor_UpdateAll(PlayState* play, ActorContext* actorCtx) {
+                         actor->colorFilterTimer--;
+                     }
+                     if (GameInteractor_ShouldActorUpdate(actor)) {
++#ifdef __XSDK__
++                        const s16 oot360Id = actor->id;
++                        const u64 oot360Start = __builtin_ppc_get_timebase();
++#endif
+                         actor->update(actor, play);
+                         GameInteractor_ExecuteOnActorUpdate(actor);
++#ifdef __XSDK__
++                        // by the id read before: an update may kill the actor
++                        if (oot360Id >= 0 && oot360Id < OOT360_ACTOR_IDS) {
++                            sOot360ActorUpdateTicks[oot360Id] += __builtin_ppc_get_timebase() - oot360Start;
++                            sOot360ActorUpdates[oot360Id]++;
++                        }
++#endif
+                     }
+                     func_8003F8EC(play, &play->colCtx.dyna, actor);
+                 }
+@@ -3117,7 +3189,16 @@ void Actor_DrawAll(PlayState* play, ActorContext* actorCtx) {
+                         invisibleActorCounter++;
+                     } else {
+                         if ((HREG(64) != 1) || ((HREG(65) != -1) && (HREG(65) != HREG(66))) || (HREG(72) == 0)) {
++#ifdef __XSDK__
++                            const s16 oot360Id = actor->id;
++                            const u64 oot360Start = __builtin_ppc_get_timebase();
+                             Actor_Draw(play, actor);
++                            if (oot360Id >= 0 && oot360Id < OOT360_ACTOR_IDS) {
++                                sOot360ActorDrawTicks[oot360Id] += __builtin_ppc_get_timebase() - oot360Start;
++                            }
++#else
++                            Actor_Draw(play, actor);
++#endif
+                             actor->isDrawn = true;
+                         }
+                     }
 diff --git a/soh/src/code/z_bgcheck.c b/soh/src/code/z_bgcheck.c
 index d3c18357..66998377 100644
 --- a/soh/src/code/z_bgcheck.c
@@ -1279,8 +3063,45 @@ index d3c18357..66998377 100644
      planeDistDelta = planeDistA - planeDistB;
      if ((planeDistA >= 0.0f && planeDistB >= 0.0f) || (planeDistA < 0.0f && planeDistB < 0.0f) ||
          (chkOneFace && planeDistA < 0.0f && planeDistB > 0.0f) || IS_ZERO(planeDistDelta)) {
+diff --git a/soh/src/code/z_kaleido_scope_call.c b/soh/src/code/z_kaleido_scope_call.c
+index b685fa0a..11edc9c3 100644
+--- a/soh/src/code/z_kaleido_scope_call.c
++++ b/soh/src/code/z_kaleido_scope_call.c
+@@ -73,6 +73,16 @@ void KaleidoScopeCall_Update(PlayState* play) {
+                 pauseCtx->unk_1EC = 0;
+                 pauseCtx->state = (pauseCtx->state & 0xFFFF) + 1;
+                 gSaveContext.ship.stats.count[COUNT_PAUSES]++;
++#ifdef __XSDK__
++                {
++                    // oot360: the pause menu's pages (dozens of item icons and names, 4x in the HD packs) go to the
++                    // GPU while it opens, up to 12 ms a frame for 45 frames, rather than turning HD one by one
++                    // (libultraship's interpreter.cpp)
++                    void Oot360_BoostHdImports(u32 frames);
++
++                    Oot360_BoostHdImports(45);
++                }
++#endif
+             }
+         } else if (pauseCtx->state == 8) {
+             HREG(80) = 7;
+@@ -130,6 +140,15 @@ void KaleidoScopeCall_Draw(PlayState* play) {
+         if (((play->pauseCtx.state >= 4) && (play->pauseCtx.state <= 7)) ||
+             ((play->pauseCtx.state >= 11) && (play->pauseCtx.state <= 18))) {
+             if (gKaleidoMgrCurOvl == kaleidoScopeOvl) {
++#ifdef __XSDK__
++                {
++                    // oot360 (from zeldaMM): the pause menu draws before the overlay, where FXAA runs (graph.c): none
++                    // this frame, or it would blur the menu (the frame its background is copied again)
++                    extern s32 gOot360FxaaBeforeOverlay;
++
++                    gOot360FxaaBeforeOverlay = false;
++                }
++#endif
+                 sKaleidoScopeDrawFunc(play);
+             }
+         }
 diff --git a/soh/src/code/z_message_PAL.c b/soh/src/code/z_message_PAL.c
-index 66a7baae..9ab538e4 100644
+index 66a7baae..83fd2f5f 100644
 --- a/soh/src/code/z_message_PAL.c
 +++ b/soh/src/code/z_message_PAL.c
 @@ -1587,7 +1587,21 @@ void Message_DrawText(PlayState* play, Gfx** gfxP) {
@@ -1306,3 +3127,268 @@ index 66a7baae..9ab538e4 100644
                  charTexIdx += FONT_CHAR_TEX_SIZE;
  
                  msgCtx->textPosX += (s32)(sFontWidths[character - ' '] * (R_TEXT_CHAR_SCALE / 100.0f));
+@@ -2866,6 +2880,16 @@ void Message_StartTextbox(PlayState* play, u16 textId, Actor* actor) {
+     msgCtx->stateTimer = 0;
+     msgCtx->textDelayTimer = 0;
+     play->msgCtx.ocarinaMode = OCARINA_MODE_00;
++#ifdef __XSDK__
++    {
++        // oot360: the text box and the letters it prints first (the HD packs' font is 4x) go to the GPU as it opens,
++        // up to 12 ms a frame for 30 frames, rather than the N64's letters standing in for a few frames
++        // (libultraship's interpreter.cpp)
++        void Oot360_BoostHdImports(u32 frames);
++
++        Oot360_BoostHdImports(30);
++    }
++#endif
+ }
+ 
+ void Message_ContinueTextbox(PlayState* play, u16 textId) {
+diff --git a/soh/src/code/z_parameter.c b/soh/src/code/z_parameter.c
+index 3681efd1..5af4312a 100644
+--- a/soh/src/code/z_parameter.c
++++ b/soh/src/code/z_parameter.c
+@@ -3612,8 +3612,10 @@ void Interface_DrawMagicBar(PlayState* play) {
+     CLOSE_DISPS(play->state.gfxCtx);
+ }
+ 
++#ifndef __XSDK__
+ static Vtx sEnemyHealthVtx[16];
+ static Mtx sEnemyHealthMtx[2];
++#endif
+ 
+ // Draws an enemy health bar using the magic bar textures and positions it in a similar way to Z-Targeting
+ void Interface_DrawEnemyHealthBar(TargetContext* targetCtx, PlayState* play) {
+@@ -3644,6 +3646,15 @@ void Interface_DrawEnemyHealthBar(TargetContext* targetCtx, PlayState* play) {
+ 
+     OPEN_DISPS(play->state.gfxCtx);
+ 
++#ifdef __XSDK__
++    // oot360 (from zeldaMM): the render thread draws this frame while the game builds the next one (OTRGlobals.cpp);
++    // the bar's vertices and matrices go in this frame's gfx pool, not in arrays the next frame rewrites.
++    // Ship_CreateQuadVertexGroup sets positions and texture coordinates only; the rest was zero in the static array.
++    Vtx* sEnemyHealthVtx = (Vtx*)Graph_Alloc(play->state.gfxCtx, sizeof(Vtx) * 16);
++    Mtx* sEnemyHealthMtx = (Mtx*)Graph_Alloc(play->state.gfxCtx, sizeof(Mtx) * 2);
++    memset(sEnemyHealthVtx, 0, sizeof(Vtx) * 16);
++#endif
++
+     if (targetCtx->unk_48 != 0 && actor != NULL && actor->category == ACTORCAT_ENEMY) {
+         s16 texHeight = 16;
+         s16 endTexWidth = 8;
+diff --git a/soh/src/code/z_play.c b/soh/src/code/z_play.c
+index 729edd0e..53d8f704 100644
+--- a/soh/src/code/z_play.c
++++ b/soh/src/code/z_play.c
+@@ -51,6 +51,23 @@ void disableBetaQuest();
+ 
+ void OTRPlay_SpawnScene(PlayState* play, s32 sceneId, s32 spawn);
+ 
++#ifdef __XSDK__
++void Oot360_RenderWait(void); // soh/OTRGlobals.cpp
++// oot360 (from zeldaMM): where the game thread's time goes within a frame, in the log's "profile game" lines every
++// 10 s (soh/platform/xbox360/MemTrace.c tells phases apart by these pointers).
++void Oot360_Phase(const char* phase);
++static const char sPhaseUpdate[] = "play: update";
++static const char sPhaseCollision[] = "play: collision";
++static const char sPhaseActorsUpdate[] = "play: update actors";
++static const char sPhaseDraw[] = "play: draw";
++static const char sPhaseActorsDraw[] = "play: draw actors";
++static const char sPhaseAfter[] = "play: after the frame";
++void Oot360_LogActorTimes(u32 frames); // z_actor.c
++#define OOT360_PLAY_PHASE(p) Oot360_Phase(p)
++#else
++#define OOT360_PLAY_PHASE(p)
++#endif
++
+ void Play_RequestViewpointBgCam(PlayState* play) {
+     Camera_ChangeDataIdx(GET_ACTIVE_CAM(play), play->unk_1242B - 1);
+ }
+@@ -779,6 +796,18 @@ void Play_Update(PlayState* play) {
+                         if (gSaveContext.cutsceneIndex >= 0xFFF0) {
+                             sceneLayer = SCENE_LAYER_CUTSCENE_FIRST + (gSaveContext.cutsceneIndex & 0xF);
+                         }
++#ifdef __XSDK__
++                        {
++                            // oot360 (from zeldaMM): the next scene's resources loaded during the fade out
++                            // (soh/OTRGlobals.cpp)
++                            void Oot360_PrefetchSceneOfEntrance(s32 entrance);
++
++                            // not for the special ones (back to the title is -1, the "return" ones past the table)
++                            if (play->nextEntranceIndex >= 0) {
++                                Oot360_PrefetchSceneOfEntrance(play->nextEntranceIndex + sceneLayer);
++                            }
++                        }
++#endif
+ 
+                         // fade out bgm if "continue bgm" flag is not set
+                         if (!(gEntranceTable[play->nextEntranceIndex + sceneLayer].field &
+@@ -1152,6 +1181,7 @@ void Play_Update(PlayState* play) {
+                     func_800973FC(play, &play->roomCtx);
+ 
+                     PLAY_LOG(3612);
++                    OOT360_PLAY_PHASE(sPhaseCollision);
+                     CollisionCheck_AT(play, &play->colChkCtx);
+ 
+                     PLAY_LOG(3618);
+@@ -1164,10 +1194,12 @@ void Play_Update(PlayState* play) {
+                     CollisionCheck_ClearContext(play, &play->colChkCtx);
+ 
+                     PLAY_LOG(3637);
++                    OOT360_PLAY_PHASE(sPhaseActorsUpdate);
+ 
+                     if (!play->haltAllActors) {
+                         Actor_UpdateAll(play, &play->actorCtx);
+                     }
++                    OOT360_PLAY_PHASE(sPhaseUpdate);
+ 
+                     PLAY_LOG(3643);
+                     func_80064558(play, &play->csCtx);
+@@ -1313,6 +1345,15 @@ void Play_Draw(PlayState* play) {
+     static bool hasCapturedPauseBuffer;
+     bool recapturePauseBuffer = false;
+ 
++#ifdef __XSDK__
++    // oot360 (from zeldaMM): the render thread copies the frame a frame later than the PC would (OTRGlobals.cpp);
++    // before taking a copy that hasn't happened yet for one that failed (and drawing the world and copying it again,
++    // under the pause menu, every frame), wait for it.
++    if ((R_PAUSE_MENU_MODE == 2 || R_PAUSE_MENU_MODE == 3) && !hasCapturedPauseBuffer) {
++        Oot360_RenderWait();
++    }
++#endif
++
+     // If the size has changed, alt assets toggled, or dropped frames leading to the buffer not being copied,
+     // set the prerender state back to setup to copy a new frame.
+     // This requires not rendering kaleido during this copy to avoid kaleido itself being copied too.
+@@ -1324,6 +1365,18 @@ void Play_Draw(PlayState* play) {
+     }
+     // #endregion
+ 
++#ifdef __XSDK__
++    {
++        // oot360 (from zeldaMM): this frame's FXAA (gOot360.Fxaa) between the world and the overlay (graph.c), when the
++        // world is drawn: not the pause menu's frozen background nor a transition's tiles. The frame the pause menu's
++        // background is copied in (mode 1) too, so it's smoothed as the game was; KaleidoScopeCall_Draw turns it off
++        // for a frame that draws the menu, so the interface, text boxes and menus drawn after it stay sharp.
++        extern s32 gOot360FxaaBeforeOverlay;
++
++        gOot360FxaaBeforeOverlay = (R_PAUSE_MENU_MODE <= 1) && (gTrnsnUnkState <= 1);
++    }
++#endif
++
+     OPEN_DISPS(gfxCtx);
+ 
+     gSegments[4] = VIRTUAL_TO_PHYSICAL(play->objectCtx.status[play->objectCtx.mainKeepIndex].segment);
+@@ -1520,7 +1573,9 @@ void Play_Draw(PlayState* play) {
+         }
+ 
+         if ((HREG(80) != 10) || (HREG(85) != 0)) {
++            OOT360_PLAY_PHASE(sPhaseActorsDraw);
+             Actor_DrawAll(play, &play->actorCtx);
++            OOT360_PLAY_PHASE(sPhaseDraw);
+         }
+ 
+         if ((HREG(80) != 10) || (HREG(86) != 0)) {
+@@ -1678,16 +1733,29 @@ void Play_Main(GameState* thisx) {
+     }
+ 
+     if ((HREG(80) != 10) || (HREG(81) != 0)) {
++        OOT360_PLAY_PHASE(sPhaseUpdate);
+         Play_Update(play);
+     }
+ 
+     PLAY_LOG(4583);
+ 
++    OOT360_PLAY_PHASE(sPhaseDraw);
+     FrameInterpolation_StartRecord();
+     Play_Draw(play);
+     FrameInterpolation_StopRecord();
++    OOT360_PLAY_PHASE(sPhaseAfter);
+ 
+     PLAY_LOG(4587);
++#ifdef __XSDK__
++    {
++        static u32 sOot360Frames;
++
++        if (++sOot360Frames == 200) {
++            Oot360_LogActorTimes(sOot360Frames);
++            sOot360Frames = 0;
++        }
++    }
++#endif
+ 
+     if (CVarGetInteger(CVAR_CHEAT("TimeSync"), 0)) {
+         const int maxRealDaySeconds = 86400;
+diff --git a/soh/src/code/z_scene.c b/soh/src/code/z_scene.c
+index 6dcc51d9..b68aca30 100644
+--- a/soh/src/code/z_scene.c
++++ b/soh/src/code/z_scene.c
+@@ -5,9 +5,16 @@
+ 
+ RomFile sNaviMsgFiles[];
+ 
++#ifdef __XSDK__
++void Oot360_PrefetchObject(s16 id); // soh/OTRGlobals.cpp: the object's resources loaded ahead
++#endif
++
+ s32 Object_Spawn(ObjectContext* objectCtx, s16 objectId) {
+     size_t size;
+ 
++#ifdef __XSDK__
++    Oot360_PrefetchObject(objectId);
++#endif
+     objectCtx->status[objectCtx->num].id = objectId;
+     size = gObjectTable[objectId].vromEnd - gObjectTable[objectId].vromStart;
+ 
+diff --git a/soh/src/code/z_vr_box.c b/soh/src/code/z_vr_box.c
+index 74e68bfa..579014c7 100644
+--- a/soh/src/code/z_vr_box.c
++++ b/soh/src/code/z_vr_box.c
+@@ -451,19 +451,30 @@ void func_800AF178(SkyboxContext* skyboxCtx, s32 arg1) {
+     }
+ }
+ 
++#ifdef __XSDK__
++// oot360: the sky's textures loaded ahead on the loader threads, set up a while before they're drawn (soh/OTRGlobals.cpp)
++void Oot360_PrefetchTexture(const char* path);
++#define OOT360_PREFETCH_TEXTURE(p) Oot360_PrefetchTexture(p)
++#else
++#define OOT360_PREFETCH_TEXTURE(p)
++#endif
++
+ void LoadSkyboxTex(SkyboxContext* skyboxCtx, int segmentIndex, int imageIndex, char* tex, int width, int height,
+                    int offsetW, int offsetH) {
+     skyboxCtx->textures[segmentIndex][imageIndex] = tex;
++    OOT360_PREFETCH_TEXTURE(tex);
+ }
+ 
+ void LoadSkyboxTexAtOffset(SkyboxContext* skyboxCtx, int segmentIndex, int imageIndex, char* tex, int width, int height,
+                            int offset) {
+     skyboxCtx->textures[segmentIndex][imageIndex] = tex;
++    OOT360_PREFETCH_TEXTURE(tex);
+ }
+ 
+ void LoadSkyboxPalette(SkyboxContext* skyboxCtx, int paletteIndex, char* palTex, int width, int height) {
+     skyboxCtx->palettes[paletteIndex] = palTex;
+     skyboxCtx->palette_size = width * height;
++    OOT360_PREFETCH_TEXTURE(palTex);
+ }
+ 
+ static const char* sSBVRFine0Tex[] = { gSunriseSkybox1Tex, gSunriseSkybox2Tex, gSunriseSkybox3Tex, gSunriseSkybox4Tex,
+@@ -948,7 +959,17 @@ void Skybox_Init(GameState* state, SkyboxContext* skyboxCtx, s16 skyboxId) {
+     }
+ }
+ 
++#ifdef __XSDK__
++void Oot360_RenderWait(void); // soh/OTRGlobals.cpp
++#endif
++
+ void Skybox_Update(SkyboxContext* skyboxCtx) {
++#ifdef __XSDK__
++    // oot360: the sky's display lists and vertices are rebuilt in place, and the render thread may still draw the last
++    // frame from them (a frame behind the game, soh/OTRGlobals.cpp): it finishes first (the time of day changes the sky
++    // a few times a day)
++    Oot360_RenderWait();
++#endif
+     if (skyboxCtx->skyboxId != SKYBOX_NONE) {
+         osSyncPrintf(VT_FGCOL(GREEN));
+ 

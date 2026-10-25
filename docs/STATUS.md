@@ -218,6 +218,53 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
   (x, y, w) determinant (negated; equal sign to the divided cross product with its flip, checked on 300,000 random
   triangles) instead of six divisions. Log: vertices a frame, lights per vertex, setup and loop ms, ns per vertex,
   kept/full triangle setups, and each frame over 25 ms with its resource load and texture time.
+- **Test 22:** (built, not yet run) what the Majora's Mask port (zeldaMM, tests 1-1i, same libultraship and xsdk patch)
+  learned, brought back. libultraship: zeldaMM's patch on top of oot360's (its CVars renamed gZeldaMM.* ->
+  gOot360.*): HD textures imported at most 2 ms a frame (gOot360.HdUploadMs) with the game's own texture standing in
+  meanwhile and loaded in the background (Oot360_LoadTextureNoWait); the texture cache emptied only of what an
+  eviction frees (ZeldaMM_TextureCacheDeleteRanges); FXAA (gOot360.Fxaa) between the world and the overlay; mip
+  levels blended a level sharper with anisotropy (gOot360.Mipmaps, gOot360.Anisotropy); the cached misses forgotten
+  once the mods mount; console variables thread-safe; zeldaMM's interpreter, vertex and triangle work (kept triangle
+  setup with its fixes, point lights in VMX, profiling one frame in eight). The game:
+  - Scenes and objects loaded ahead on three loader threads (hardware threads 5, 3, 0) from an index of every archive's
+    files: the next scene during the fade out (TRANS_MODE_SETUP), the scene and the objects all its rooms list in the
+    transition's black screen (up to 1.2 s, the music going on), the objects as the rooms ask for them, the skies'
+    textures as the scene and the time of day set them up (z_vr_box.c). An HD texture's N64 version loads with it, to
+    stand in.
+  - No stand-in for textures of directories a model mod replaces the display lists of (found once the mods mount by
+    the files' names: "DL"/"vtx"): Djipi's 3DS Experience has 3DS models for 359 of its 595 directories (15,000 of its
+    19,000 textures), drawn with the 3DS UVs, which the N64 texture would have scrambled while the HD one loaded; those
+    import at once. A new scene's first 90 frames (its fade in) take up to 12 ms of HD imports each instead of 2, the
+    pause menu's first 45 as it opens, a text box's first 30 (Oot360_BoostHdImports).
+  - Ship of Harkinian unloaded every alt/ resource and emptied the texture cache at each game state's end, that is at
+    every scene change (game.c): the HD textures and the model mods' display lists (Link's, the interface's) read,
+    parsed and uploaded again for every scene. Off on the Xbox 360; scenes are evicted as memory needs instead
+    (Oot360_SceneResources, as zeldaMM): beyond a dozen, oldest first while free memory is under 150 MB, every scene
+    but the new one and the objects no scene asked for lately under 96 MB; the skies no recent scene set up; the
+    interface's pictures only some screens show (pause names and maps, title cards, file select) while short. Never:
+    Link's objects, the gameplay keeps, the get-item models and any directory with a patched display list.
+  - The two graphics pools held 48 MB (a million commands each buffer, "basically impossible to overflow"): 12 MB now
+    (256 K commands, 40 times the N64's largest); graph.c logs the most each buffer took and any frame that ran out
+    (as on the N64, not drawn).
+  - FXAA's tag in graph.c for play frames that draw the world (Play_Draw), none for the pause menu's
+    (KaleidoScopeCall_Draw); the pause menu's background copy waits for the render thread instead of being taken again
+    every frame; the sky's display lists rebuilt with the render thread idle (Skybox_Update).
+  - Play phases and per-actor update and draw times in the log every 200 game frames, as zeldaMM.
+  - The settings menu for the console: a "Xbox 360" page (render thread, loading ahead, HD textures a frame, FXAA, mip
+    levels, anisotropy, the A and B colours in text, free memory); hidden: the controller navigation (always on),
+    background inputs, cursor, search (no keyboard), app folder, audio and renderer APIs, vsync, windowed fullscreen,
+    multi-viewports, keyboard/mouse/gyro/LED in the controller window, and the developer windows that need a keyboard
+    or are for the renderer's developers (console, hook debugger, display list and message viewers, Gfx debugger,
+    popout menu, resource logging); FPS up to 60; the texture filter applies without a restart.
+  - The Portuguese texture packs ("PT-BR" in their names) mount only with the game's text in Portuguese.
+  - Fixed: XML sound fonts' envelopes byte-swapped on big-endian (as zeldaMM).
+  HD pack (tools/hdpack, the user's PC only): make_hd_patch.py takes the interface's (4x, up to 1024) and Link's (4x,
+  up to 512) textures from the original mods as patches over the 2x pack: "A2 Interface 4x" (1093 textures), "B1 Link
+  4x" (24), "C1 PT-BR Interface 4x" (627; EduardoA's quest icons and key counter were 937x937 texels for 24x24 and
+  16x16 icons, left whole by the halving, 3.5 MB each: resized to any size now). make_pt_font_fix.py's "C2 PT-BR Font
+  Fix": with the packs, Portuguese text showed Î for Á, Á for Õ, û for Ü and ü, ü for Ú (EduardoA's font puts its
+  letters in other slots than the translated ROM's); the right letters from the packs' own glyphs at 4x, and the file
+  select's "Certeza?" from ptbr.o2r. The Xbox 360 button glyphs at 4x too (tools/xboxbuttons), left out of A2.
 
 ## Not done yet / known gaps
 - Title screen 2-cycle effect, logo and text; controller input (test 6); 60 fps.
