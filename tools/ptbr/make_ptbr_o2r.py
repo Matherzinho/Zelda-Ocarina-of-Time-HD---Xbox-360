@@ -87,9 +87,9 @@ def text_resource(entries, data: bytes) -> bytes:
         start = seg & 0xFFFFFF
         end = entries[i + 1][2] & 0xFFFFFF if entries[i + 1][2] else len(data)
         msg = data[start:end]
-        cut = msg.find(b"\x02")
-        if cut >= 0:
-            msg = msg[:cut + 1]  # through the end code, without the alignment padding
+        # Without the alignment padding after the end code. Not up to the first 0x02: control codes take 0x02 as an
+        # argument too (0x07 next id, 0x13 icon, 0x14 speed...).
+        msg = msg.rstrip(b"\x00")
         messages.append((tid, type_pos >> 4, type_pos & 0xF, msg))
     out += struct.pack("<I", len(messages))
     for tid, box, ypos, msg in messages:

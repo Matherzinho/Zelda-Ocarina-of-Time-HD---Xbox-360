@@ -107,6 +107,16 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
   First run crashed at the title: ptbr.o2r replaced the whole message table, and an NTSC table has no 0xFFFC,
   which the PAL file select font reads without a null check; ptbr.o2r now uses SoH's override folder (by id).
   Also loaded the archive twice; -O3 tried and dropped until measured.
+  Still froze with the override archive, and started without it. SoH's message tables had no 0xFFFF entry (the lookup
+  walks until one) and OTRMessage_LoadCustom searched one entry past the allocation, writing an override there when the
+  garbage matched an id: heap corruption. The tool also cut messages at the first 0x02, which is an argument byte of
+  several control codes.
+- **Test 11:** message tables get a 0xFFFF sentinel, overrides search only the real entries; the tool keeps whole
+  messages. Render thread (OTRGlobals.cpp): the interpreter and GPU run on hardware thread 1 a frame behind the game;
+  the game thread computes the interpolated matrices, hands the frame over and runs the next frame's logic. It waits
+  for the render before the next hand-over, at game state changes, texture cache edits, blended textures and resource
+  directory pushes; frames draw on the game thread while a menu is open; pixel depth answers "far" on the game
+  thread; gOot360.RenderThread turns it off. Phase profiles per thread.
 
 ## Not done yet / known gaps
 - Title screen 2-cycle effect, logo and text; controller input (test 6); 60 fps.
