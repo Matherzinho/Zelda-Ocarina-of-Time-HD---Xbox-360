@@ -176,6 +176,10 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
 - **Test 16:** (built, not yet run) GetResourceRawPointer(name) and the texture-by-path command keep what each path
   resolved to, per thread, until gResourceGeneration changes (a map with string_view lookup, no allocation); the game
   thread's ResourceGetDataByName benefits too. GfxSpVertex reads the MP matrix and the aspect ratio once a call.
+  Result (user, 2026-10-25): better; with the mods 37-49 fps at 60, the interpreter 18-25 ms (vertex-path command
+  8.7 ms of it with the transform, TRI2 5.5); near 60 with Internal Resolution lowered, so the GPU limits too.
+- **Test 17:** (built, not yet run) uploaded textures of 64 texels a side and more get a full mip chain (box filter
+  on the CPU, point mip filter); the log counts resource-cache misses and how often gResourceGeneration moved.
 
 ## Not done yet / known gaps
 - Title screen 2-cycle effect, logo and text; controller input (test 6); 60 fps.

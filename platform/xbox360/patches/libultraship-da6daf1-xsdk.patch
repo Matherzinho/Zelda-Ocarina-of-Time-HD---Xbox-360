@@ -50,10 +50,10 @@ index 7c16ca1..5ff7e5b 100644
  class Fast3dWindow : public Ship::Window {
 diff --git a/include/fast/backends/gfx_xenos.h b/include/fast/backends/gfx_xenos.h
 new file mode 100644
-index 0000000..13ee8f3
+index 0000000..b14b42b
 --- /dev/null
 +++ b/include/fast/backends/gfx_xenos.h
-@@ -0,0 +1,369 @@
+@@ -0,0 +1,370 @@
 +#ifdef ENABLE_XENOS
 +#pragma once
 +
@@ -290,7 +290,8 @@ index 0000000..13ee8f3
 +
 +    XenosTexture& Texture(uint32_t id);
 +    void ApplySampler(XenosTexture& t);
-+    bool CreateTextureStorage(XenosTexture& t, uint32_t format, uint32_t width, uint32_t height, bool resolveTarget);
++    bool CreateTextureStorage(XenosTexture& t, uint32_t format, uint32_t width, uint32_t height, bool resolveTarget,
++                              uint32_t levels = 1);
 +
 +    // eDRAM: one framebuffer at a time; its colour goes to its texture when another takes eDRAM.
 +    void BindTarget(int fbId);
@@ -738,10 +739,10 @@ index 2b77a5f..d4dea73 100644
      }
 diff --git a/src/fast/backends/gfx_xenos.cpp b/src/fast/backends/gfx_xenos.cpp
 new file mode 100644
-index 0000000..239607a
+index 0000000..725db20
 --- /dev/null
 +++ b/src/fast/backends/gfx_xenos.cpp
-@@ -0,0 +1,1895 @@
+@@ -0,0 +1,1940 @@
 +#ifdef ENABLE_XENOS
 +// Fast3D on the Xbox 360's Xenos GPU through xenosworks' xsdk.
 +//
@@ -796,6 +797,8 @@ index 0000000..239607a
 +uint64_t gOot360Prof[8];
 +uint64_t gOot360OpTicks[256];
 +uint32_t gOot360OpCount[256];
++extern uint32_t gOot360ResourceMisses;
++uint32_t Oot360_ResourceGeneration(void);
 +}
 +namespace Fast {
 +
@@ -1306,7 +1309,7 @@ index 0000000..239607a
 +    {
 +        XenosTexture& w = Texture(mWhiteTexture);
 +        const uint8_t white[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
-+        if (CreateTextureStorage(w, XSDK_FORMAT_R8G8B8A8, 1, 1, false)) {
++        if (CreateTextureStorage(w, XSDK_FORMAT_R8G8B8A8, 1, 1, false, 1)) {
 +            xsdk_texture_upload(&w.texture, 0, white, 4);
 +            xsdk_gpu_invalidate(w.texture.address, w.texture.size_bytes);
 +        }
@@ -1539,12 +1542,12 @@ index 0000000..239607a
 +}
 +
 +bool GfxRenderingAPIXenos::CreateTextureStorage(XenosTexture& t, uint32_t format, uint32_t width, uint32_t height,
-+                                                bool resolveTarget) {
++                                                bool resolveTarget, uint32_t levels) {
 +    // Memory the GPU may still read from goes back only once this frame's fence lands.
 +    GpuFreeLater(t.memory, t.bytes);
 +    t.memory = nullptr;
 +    XsdkTexture tex = {};
-+    if (!NT_SUCCESS(xsdk_texture_init(&tex, format, width, height, 1, true))) {
++    if (!NT_SUCCESS(xsdk_texture_init(&tex, format, width, height, levels, true))) {
 +        return false;
 +    }
 +    if (resolveTarget) {
@@ -1570,11 +1573,48 @@ index 0000000..239607a
 +        return;
 +    }
 +    XenosTexture& t = Texture(mCurrentTextureIds[mCurrentTile]);
++    // Mip levels for textures of 64 texels a side and more, the high-resolution packs' (oot360, test 17): sampled
++    // smaller than they are, a level of one read 4 or 16 texels a pixel from all over the texture, and with the 3DS
++    // Experience's textures the GPU was the bottleneck. The N64's own textures, 32 or 64 texels, stay as they were
++    // but for the 64 ones, which sharpen down rather than shimmer.
++    uint32_t levels = 1;
++    if (width >= 64 && height >= 64) {
++        while ((std::max(width, height) >> (levels - 1)) > 1) {
++            levels++;
++        }
++    }
 +    // Bytes red, green, blue, alpha: as a big-endian word, R8G8B8A8.
-+    if (!CreateTextureStorage(t, XSDK_FORMAT_R8G8B8A8, width, height, false)) {
++    if (!CreateTextureStorage(t, XSDK_FORMAT_R8G8B8A8, width, height, false, levels)) {
 +        return;
 +    }
 +    xsdk_texture_upload(&t.texture, 0, rgba32Buf, width * 4);
++    if (levels > 1) {
++        // Each level the box average of the one above, as sizes halve down to 1 (an odd side's last texel dropped).
++        std::vector<uint8_t> a(rgba32Buf, rgba32Buf + (size_t)width * height * 4), b;
++        uint32_t w = width, h = height;
++        for (uint32_t level = 1; level < levels; level++) {
++            const uint32_t nw = std::max(w / 2, 1u), nh = std::max(h / 2, 1u);
++            b.resize((size_t)nw * nh * 4);
++            for (uint32_t y = 0; y < nh; y++) {
++                const uint32_t y0 = std::min(y * 2, h - 1), y1 = std::min(y * 2 + 1, h - 1);
++                for (uint32_t x = 0; x < nw; x++) {
++                    const uint32_t x0 = std::min(x * 2, w - 1), x1 = std::min(x * 2 + 1, w - 1);
++                    const uint8_t* p00 = &a[((size_t)y0 * w + x0) * 4];
++                    const uint8_t* p01 = &a[((size_t)y0 * w + x1) * 4];
++                    const uint8_t* p10 = &a[((size_t)y1 * w + x0) * 4];
++                    const uint8_t* p11 = &a[((size_t)y1 * w + x1) * 4];
++                    uint8_t* q = &b[((size_t)y * nw + x) * 4];
++                    for (int c = 0; c < 4; c++) {
++                        q[c] = (uint8_t)((p00[c] + p01[c] + p10[c] + p11[c] + 2) >> 2);
++                    }
++                }
++            }
++            xsdk_texture_upload(&t.texture, level, b.data(), nw * 4);
++            a.swap(b);
++            w = nw;
++            h = nh;
++        }
++    }
 +    xsdk_gpu_invalidate(t.texture.address, t.texture.size_bytes);
 +    Trace("upload texture %u (tile %d): %ux%u", (unsigned)mCurrentTextureIds[mCurrentTile], mCurrentTile,
 +          (unsigned)width, (unsigned)height);
@@ -1710,7 +1750,7 @@ index 0000000..239607a
 +    if (mBoundDirty) {
 +        XenosTexture& t = Texture(fb.textureId);
 +        if (!t.memory || t.width != fb.width || t.height != fb.height) {
-+            CreateTextureStorage(t, XSDK_FORMAT_A8R8G8B8, fb.width, fb.height, true);
++            CreateTextureStorage(t, XSDK_FORMAT_A8R8G8B8, fb.width, fb.height, true, 1);
 +            t.linear = true;
 +            t.addressU = t.addressV = XSDK_ADDRESS_CLAMP;
 +            t.samplerDirty = true;
@@ -2455,6 +2495,12 @@ index 0000000..239607a
 +                              (double)gOot360OpTicks[op] / 49875.0 / 600.0, (unsigned)(gOot360OpCount[op] / 600));
 +            }
 +            xsdk_log_write("xenos: opcodes, ms/calls a frame:%s", line);
++            static uint32_t lastGeneration;
++            const uint32_t generation = Oot360_ResourceGeneration();
++            xsdk_log_write("xenos: resource lookups missed %u, resource cache changed %u times (600 frames)",
++                           (unsigned)gOot360ResourceMisses, (unsigned)(generation - lastGeneration));
++            gOot360ResourceMisses = 0;
++            lastGeneration = generation;
 +            memset(gOot360OpTicks, 0, sizeof gOot360OpTicks);
 +            memset(gOot360OpCount, 0, sizeof gOot360OpCount);
 +        }
@@ -4320,10 +4366,10 @@ index 59b7082..026f90f 100644
  
  std::shared_ptr<ResourceInitData> IResource::GetInitData() {
 diff --git a/src/ship/resource/ResourceManager.cpp b/src/ship/resource/ResourceManager.cpp
-index c62ee72..d4d781e 100644
+index c62ee72..ad52d8d 100644
 --- a/src/ship/resource/ResourceManager.cpp
 +++ b/src/ship/resource/ResourceManager.cpp
-@@ -9,6 +9,18 @@
+@@ -9,6 +9,25 @@
  #include "ship/config/ConsoleVariable.h"
  #include "ship/Context.h"
  
@@ -4335,6 +4381,13 @@ index c62ee72..d4d781e 100644
 +extern std::atomic<uint32_t> gResourceGeneration; // Resource.cpp
 +}
 +#define OOT360_RESOURCES_CHANGED() (gResourceGeneration++)
++// Lookups the per-thread caches below didn't answer, for gfx_xenos.cpp's log.
++extern "C" {
++uint32_t gOot360ResourceMisses = 0;
++uint32_t Oot360_ResourceGeneration(void) {
++    return Ship::gResourceGeneration.load();
++}
++}
 +#else
 +#define OOT360_RESOURCES_CHANGED()
 +#endif
@@ -4342,7 +4395,7 @@ index c62ee72..d4d781e 100644
  namespace Ship {
  
  ResourceFilter::ResourceFilter(const std::list<std::string>& includeMasks, const std::list<std::string>& excludeMasks,
-@@ -156,6 +168,7 @@ std::shared_ptr<IResource> ResourceManager::LoadResourceProcess(const ResourceId
+@@ -156,6 +175,7 @@ std::shared_ptr<IResource> ResourceManager::LoadResourceProcess(const ResourceId
      if (file == nullptr && !mArchiveManager->HasFile(identifier.Path + ".meta")) {
          SPDLOG_TRACE("Failed to load resource file at path {}", identifier.Path);
          mResourceCache[identifier] = ResourceLoadError::NotFound;
@@ -4350,7 +4403,7 @@ index c62ee72..d4d781e 100644
          return nullptr;
      }
  
-@@ -181,6 +194,7 @@ std::shared_ptr<IResource> ResourceManager::LoadResourceProcess(const ResourceId
+@@ -181,6 +201,7 @@ std::shared_ptr<IResource> ResourceManager::LoadResourceProcess(const ResourceId
          } else {
              mResourceCache[identifier] = ResourceLoadError::NotFound;
          }
@@ -4358,7 +4411,7 @@ index c62ee72..d4d781e 100644
      }
  
      if (resource != nullptr) {
-@@ -420,6 +434,7 @@ size_t ResourceManager::UnloadResource(const ResourceIdentifier& identifier) {
+@@ -420,6 +441,7 @@ size_t ResourceManager::UnloadResource(const ResourceIdentifier& identifier) {
      if (mResourceCache.contains(identifier)) {
          const std::lock_guard<std::mutex> lock(mMutex);
          mResourceCache.erase(identifier);
@@ -4366,7 +4419,7 @@ index c62ee72..d4d781e 100644
      }
  
      return ret;
-@@ -432,6 +447,7 @@ size_t ResourceManager::UnloadResource(const std::string& filePath) {
+@@ -432,6 +454,7 @@ size_t ResourceManager::UnloadResource(const std::string& filePath) {
  void ResourceManager::CacheExternalResource(const std::string& filePath, std::shared_ptr<IResource> resource) {
      const std::lock_guard<std::mutex> lock(mMutex);
      mResourceCache[{ filePath, mDefaultCacheOwner, mDefaultCacheArchive }] = resource;
@@ -4374,7 +4427,7 @@ index c62ee72..d4d781e 100644
  }
  
  bool ResourceManager::WriteResource(const ResourceIdentifier& identifier, const std::vector<uint8_t>& data,
-@@ -468,6 +484,7 @@ bool ResourceManager::IsAltAssetsEnabled() {
+@@ -468,6 +491,7 @@ bool ResourceManager::IsAltAssetsEnabled() {
  
  void ResourceManager::SetAltAssetsEnabled(bool isEnabled) {
      mAltAssetsEnabled = isEnabled;
@@ -4382,7 +4435,7 @@ index c62ee72..d4d781e 100644
  }
  
  size_t ResourceManager::GetResourceSize(std::shared_ptr<IResource> resource) {
-@@ -518,16 +535,152 @@ void* ResourceManager::GetResourceRawPointer(std::shared_ptr<IResource> resource
+@@ -518,16 +542,154 @@ void* ResourceManager::GetResourceRawPointer(std::shared_ptr<IResource> resource
      return resource->GetRawPointer();
  }
  
@@ -4435,6 +4488,7 @@ index c62ee72..d4d781e 100644
 +    if (found != resolved.items.end()) {
 +        return found->second;
 +    }
++    gOot360ResourceMisses++;
 +    void* pointer = GetResourceRawPointer(LoadResource(name));
 +    if (pointer != nullptr && gResourceGeneration.load(std::memory_order_acquire) == generation) {
 +        resolved.items.emplace(name, pointer);
@@ -4445,8 +4499,8 @@ index c62ee72..d4d781e 100644
  
      return GetResourceRawPointer(resource);
 +#endif
-+}
-+
+ }
+ 
 +#ifdef __XSDK__
 +// oot360: manager->LoadResourceProcess(path), kept per thread until the cache changes (textures named by path).
 +std::shared_ptr<IResource> Oot360_LoadResourceCachedByPath(ResourceManager* manager, const char* path) {
@@ -4494,9 +4548,9 @@ index c62ee72..d4d781e 100644
 +        resolved.resources[crc] = resource;
 +    }
 +    return resource;
- }
++}
 +#endif
- 
++
  void* ResourceManager::GetResourceRawPointer(uint64_t crc) {
 +#ifdef __XSDK__
 +    // oot360: what each hash resolved to, per thread, until the cache changes. The interpreter asks this for most
@@ -4521,6 +4575,7 @@ index c62ee72..d4d781e 100644
 +    if (found != resolved.pointers.end()) {
 +        return found->second;
 +    }
++    gOot360ResourceMisses++;
 +    void* pointer = GetResourceRawPointer(LoadResource(crc));
 +    // Only once nothing changed meanwhile: the load may itself have cached things.
 +    if (pointer != nullptr && gResourceGeneration.load(std::memory_order_acquire) == generation) {
