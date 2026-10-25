@@ -151,6 +151,18 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
 - **Test 14:** (built, not yet run) depth clamp in fast3d.vert (z held to 0..w where w > 0); Internal Resolution held
   to 100% and MSAA to 1 on xsdk (menu and saved settings), Fullscreen hidden; three-point filtering 26 instructions
   cheaper for two textures (148 -> 122; linear 86); GPU timing only with gOot360.GpuTiming.
+  Result (user, 2026-10-24): smooth 60 fps with occasional hitches; a quick flicker showing what's under floors
+  (the per-vertex depth clamp bent the depth of triangles reaching under the camera).
+- **Test 15:** (built, not yet run) depth: instead of clamping, z/w is remapped to (z/w + 3) / 4 in fast3d.vert, a
+  linear change of clip space that moves the near plane to a quarter of its distance. Per-opcode interpreter profile
+  in the log (exclusive time and calls per display list opcode). Xbox 360 buttons: HUD A green and B red set once as
+  cosmetics (gOot360.XboxButtonsApplied); the message font's A and B glyphs drawn green and red
+  (gOot360.XboxButtons); tools/xboxbuttons draws A, B, LB, RT and LT glyphs (DejaVu Sans Bold, no game data) into
+  "Z Xbox Buttons.o2r" for game:\mods. tools/hdpack: an MPQ (.otr) reader of our own and a converter that turns
+  Ship of Harkinian mods into .o2r for game:\mods, halving raw RGBA32 textures above 2x the N64's resolution (or
+  256 px), resumable in time slices (the device shell stops background work) and deleting nothing. Djipi's 3DS
+  Experience + Skilar's Art Plus Link + EduardoA's PT-BR: 46 archives, 197 MB (from about 770 MB), on the user's PC
+  only.
 
 ## Not done yet / known gaps
 - Title screen 2-cycle effect, logo and text; controller input (test 6); 60 fps.
