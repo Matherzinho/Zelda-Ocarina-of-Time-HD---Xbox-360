@@ -187,6 +187,12 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
   goes (and when an archive is added); the per-thread caches keep misses too. GfxSpVertex sums lighting in float with
   the normal converted once (int/float conversions are load-hit-store stalls on Xenon). The log shows how long the
   CPU waited for GPU command space (xsdk_gpu_stats).
+  Result (user, 2026-10-25): gameplay smoother with stutters, the title still slow. The CPU never waited for the GPU:
+  CPU-bound. Gameplay 15-18 ms of interpreter (57-59 fps in calm places), the title 24; vertices 7-13 ms.
+- **Test 19:** (built, not yet run) GfxSpVertex in VMX (transform, aspect, clip flags, directional lighting, fog,
+  colour packing; stores straight into the loaded vertex, no int/float conversion through memory); positional lights
+  and texgen keep the scalar code. The first 64 calls and every 512th run the scalar code after it and compare;
+  a difference turns VMX off for the run and logs both.
 
 ## Not done yet / known gaps
 - Title screen 2-cycle effect, logo and text; controller input (test 6); 60 fps.
