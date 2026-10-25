@@ -136,10 +136,18 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
   open, how many PT-BR messages replaced the table and message 0x1000's text, render thread idle and GPU-wait phases.
   ptbr.o2r now also carries 267 translated pictures (item and map names, place cards, A-button labels, pause titles,
   title screen), found by content in oot.o2r's folders (tools/ptbr, with the clean USA ROM and oot.o2r).
+  Result (user, 2026-10-24): the menu works and reads well, the PT-BR text and pictures show; 60 fps held at 720p
+  (600 flips in 600-627 vblanks, interpreter 6-9 ms a frame). The pause screen's dungeon map was a blue blob.
+- **Test 13:** (built, not yet run) texture 0's mask and blend (SoH's blended textures, which colour the pause map's
+  rooms): a MASK0 variant samples the mask and blend at samplers 2 and 3 (256 variants). GPU time of a frame alone:
+  every 240 frames the GPU waits at the frame's start (xsdk_gpu_wait_word) until the CPU has queued the whole frame,
+  between two GPU clock writes; any wait for the GPU inside the frame releases it early and drops the sample. For the
+  1080p decision (the user chose to measure first): xsdk shows only a 1280x720 front buffer, which the console's
+  scaler takes to its 1920x1080 output, and 1920x1080 colour and depth (16.6 MB) need tiled passes past eDRAM's 10 MB.
 
 ## Not done yet / known gaps
 - Title screen 2-cycle effect, logo and text; controller input (test 6); 60 fps.
-- Depth readback (`GetPixelDepth` answers "far": lens flare occlusion is off); MSAA; texture masks/blends.
+- Depth readback (`GetPixelDepth` answers "far": lens flare occlusion is off); MSAA; texture 1's mask/blend.
 - Combiner shader: general (weights), split between the vertex and pixel shaders since test 12.
 - Big-endian loading of `.o2r` resources made by torch on a little-endian PC is untested (Wii U used the older
   OTR pipeline).

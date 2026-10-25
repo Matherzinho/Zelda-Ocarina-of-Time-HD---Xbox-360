@@ -50,10 +50,10 @@ index 7c16ca1..5ff7e5b 100644
  class Fast3dWindow : public Ship::Window {
 diff --git a/include/fast/backends/gfx_xenos.h b/include/fast/backends/gfx_xenos.h
 new file mode 100644
-index 0000000..aae0693
+index 0000000..13ee8f3
 --- /dev/null
 +++ b/include/fast/backends/gfx_xenos.h
-@@ -0,0 +1,351 @@
+@@ -0,0 +1,369 @@
 +#ifdef ENABLE_XENOS
 +#pragma once
 +
@@ -94,7 +94,8 @@ index 0000000..aae0693
 +    XENOS_PS_NOISE = 16,
 +    XENOS_PS_T0 = 32,
 +    XENOS_PS_T1 = 64,
-+    XENOS_PS_VARIANTS = 128,
++    XENOS_PS_MASK0 = 128,
++    XENOS_PS_VARIANTS = 256,
 +};
 +
 +// The combiner's operands: per cycle a - b, c and d (fast3d.vert and fast3d.frag).
@@ -390,6 +391,23 @@ index 0000000..aae0693
 +
 +    // Frame pacing: each frame shows for 60 / the game's fps vblanks (SoH runs at 20 unless interpolating).
 +    void PaceFrame();
++
++    // GPU time of a frame (oot360, test 13): every kTimingEvery frames the GPU waits at the frame's start for a word
++    // the CPU writes once the whole frame is queued, so the clocks around it time the GPU's work alone, not the CPU
++    // feeding it. A wait for the GPU inside the frame opens the gate early and drops that sample.
++    static constexpr uint32_t kTimingEvery = 240;
++    void TimingOpenGate();
++    void TimingRead();
++    volatile uint32_t* mTimingMem = nullptr;
++    uint32_t mTimingTag = 0;
++    bool mTimingGateClosed = false;
++    bool mTimingValid = false;
++    bool mTimingPending = false;
++    uint32_t mTimingFence = 0;
++    uint32_t mTimingSamples = 0;
++    double mTimingSumMs = 0.0;
++    double mTimingMaxMs = 0.0;
++    uint32_t mTimingDraws = 0;
 +    uint32_t mNextFlipVblank = 0;
 +    uint64_t mWaitUs = 0;
 +    XsdkPresentStats mLastStats = {};
@@ -427,7 +445,7 @@ index 45989b6..48e8ef3 100644
      target_compile_definitions(libultraship PRIVATE
          ENABLE_OPENGL
 diff --git a/src/fast/CMakeLists.txt b/src/fast/CMakeLists.txt
-index 66bf70d..7a63624 100644
+index 66bf70d..f87bd99 100644
 --- a/src/fast/CMakeLists.txt
 +++ b/src/fast/CMakeLists.txt
 @@ -39,5 +39,70 @@ if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
@@ -448,10 +466,10 @@ index 66bf70d..7a63624 100644
 +    set(XENOS_SHADERS ${XENOS_SHADER_DIR}/fast3d.vert ${XENOS_SHADER_DIR}/ui.vert ${XENOS_SHADER_DIR}/ui.frag)
 +    # One X(n) per variant, for gfx_xenos.cpp's tables of them.
 +    set(XENOS_VARIANT_LIST "")
-+    foreach(variant RANGE 0 127)
++    foreach(variant RANGE 0 255)
 +        string(APPEND XENOS_VARIANT_LIST "XENOS_VARIANT(${variant})\n")
 +        set(defines "")
-+        foreach(bit_name IN ITEMS "1;TP0" "2;TP1" "4;CYC2" "8;KILL" "16;NOISE" "32;T0" "64;T1")
++        foreach(bit_name IN ITEMS "1;TP0" "2;TP1" "4;CYC2" "8;KILL" "16;NOISE" "32;T0" "64;T1" "128;MASK0")
 +            list(GET bit_name 0 bit)
 +            list(GET bit_name 1 name)
 +            math(EXPR has "${variant} & ${bit}")
@@ -720,10 +738,10 @@ index 2b77a5f..d4dea73 100644
      }
 diff --git a/src/fast/backends/gfx_xenos.cpp b/src/fast/backends/gfx_xenos.cpp
 new file mode 100644
-index 0000000..14f9376
+index 0000000..78a717b
 --- /dev/null
 +++ b/src/fast/backends/gfx_xenos.cpp
-@@ -0,0 +1,1769 @@
+@@ -0,0 +1,1873 @@
 +#ifdef ENABLE_XENOS
 +// Fast3D on the Xbox 360's Xenos GPU through xenosworks' xsdk.
 +//
@@ -796,7 +814,9 @@ index 0000000..14f9376
 +#define XENOS_VARIANT(n)                                                                                             \
 +    static_assert(FAST3D_V##n##_FRAG_PUSH == 0 && FAST3D_V##n##_FRAG_PUSH_REGISTERS * 16 == sizeof(XenosPixelConstants), \
 +                  "fast3d.frag's Push block moved or changed");                                                      \
-+    static_assert(FAST3D_V##n##_FRAG_SAMPLER_0_0 == 0 && FAST3D_V##n##_FRAG_SAMPLER_0_1 == 1, "samplers moved");
++    static_assert(FAST3D_V##n##_FRAG_SAMPLER_0_0 == 0 && FAST3D_V##n##_FRAG_SAMPLER_0_1 == 1 &&                 \
++                      FAST3D_V##n##_FRAG_SAMPLER_0_2 == 2 && FAST3D_V##n##_FRAG_SAMPLER_0_3 == 3,                  \
++                  "samplers moved");
 +#include "fast3d_variants.inc"
 +#undef XENOS_VARIANT
 +static_assert(FAST3D_VERT_PUSH_REGISTERS * 16 == sizeof(XenosVertexConstants), "fast3d.vert's Push block changed");
@@ -1236,6 +1256,9 @@ index 0000000..14f9376
 +
 +    for (uint32_t i = 0; i < kFramesInFlight; i++) {
 +        mVertexRing[i] = xsdk_gpu_alloc(kVertexRingBytes);
++        if (i == 0) {
++            mTimingMem = xsdk_gpu_alloc(0x10000);
++        }
 +        if (!mVertexRing[i]) {
 +            xsdk_log_write("xenos: no GPU memory for the vertex ring");
 +        }
@@ -1397,6 +1420,7 @@ index 0000000..14f9376
 +    out.opts1[0] = cc.opt_alpha_threshold;
 +    out.opts1[1] = cc.opt_invisible;
 +    out.opts1[2] = cc.opt_grayscale;
++    out.opts1[3] = cc.used_masks[0] && cc.used_blend[0];
 +    out.clamps[0] = cc.usedTextures[0] && cc.clamp[0][0];
 +    out.clamps[1] = cc.usedTextures[0] && cc.clamp[0][1];
 +    out.clamps[2] = cc.usedTextures[1] && cc.clamp[1][0];
@@ -1420,6 +1444,9 @@ index 0000000..14f9376
 +    if (cc.usedTextures[1]) {
 +        prg.variant |= XENOS_PS_T1;
 +    }
++    if (cc.used_masks[0]) {
++        prg.variant |= XENOS_PS_MASK0;
++    }
 +}
 +
 +ShaderProgram* GfxRenderingAPIXenos::CreateAndLoadNewShader(uint64_t shaderId0, uint64_t shaderId1) {
@@ -1436,11 +1463,11 @@ index 0000000..14f9376
 +    prg.primDepth = cc.opt_prim_depth;
 +    prg.vertex = VertexShaderFor(cc, &prg.numFloats);
 +    BuildCombinerConstants(cc, prg);
-+    if (cc.used_masks[0] || cc.used_masks[1]) {
++    if (cc.used_masks[1]) {
 +        static bool warned = false;
 +        if (!warned) {
 +            warned = true;
-+            xsdk_log_write("xenos: texture masks/blends (alternate assets) are not drawn yet");
++            xsdk_log_write("xenos: a mask over texture 1 is not drawn yet (texture 0's is)");
 +        }
 +    }
 +    LoadShader(&prg);
@@ -1905,6 +1932,10 @@ index 0000000..14f9376
 +        return;
 +    }
 +    // Wait for the GPU to finish the resolve, then read the texture back (slow: write-combined memory).
++    if (mTimingGateClosed) {
++        mTimingValid = false;
++        TimingOpenGate();
++    }
 +    xsdk_gpu_wait(xsdk_gpu_fence(), kFenceTimeoutMs);
 +    std::vector<uint32_t> pixels((size_t)fb.width * fb.height);
 +    xsdk_texture_download_rows(&t.texture, 0, 0, fb.height, pixels.data(), fb.width * 4);
@@ -1961,6 +1992,10 @@ index 0000000..14f9376
 +    if (mVertexOffset + bytes > kVertexRingBytes) {
 +        // This frame filled its part: wait for the GPU to finish what it queued, then start the part over.
 +        mOverflowDraws++;
++        if (mTimingGateClosed) {
++            mTimingValid = false;
++            TimingOpenGate();
++        }
 +        xsdk_gpu_wait(xsdk_gpu_fence(), kFenceTimeoutMs);
 +        mVertexOffset = 0;
 +    }
@@ -1992,6 +2027,10 @@ index 0000000..14f9376
 +    }
 +    if (!Tracing()) {
 +        return true;
++    }
++    if (mTimingGateClosed) {
++        mTimingValid = false;
++        TimingOpenGate();
 +    }
 +    const NTSTATUS s = xsdk_gpu_wait(xsdk_gpu_fence(), 1000);
 +    if (!NT_SUCCESS(s)) {
@@ -2031,6 +2070,23 @@ index 0000000..14f9376
 +        tex[t] = &x;
 +        if (x.threePoint) {
 +            variant |= t == 0 ? XENOS_PS_TP0 : XENOS_PS_TP1;
++        }
++    }
++    // Texture 0's mask (tile 2) and blend (tile 4), as the interpreter imports them.
++    XenosTexture* mask0 = nullptr;
++    XenosTexture* blend0 = nullptr;
++    if (variant & XENOS_PS_MASK0) {
++        XenosTexture& m = Texture(mCurrentTextureIds[SHADER_FIRST_MASK_TEXTURE]);
++        XenosTexture& b = Texture(mCurrentTextureIds[SHADER_FIRST_REPLACEMENT_TEXTURE]);
++        if (m.memory && tex[0]) {
++            ApplySampler(m);
++            mask0 = &m;
++            if (b.memory) {
++                ApplySampler(b);
++                blend0 = &b;
++            }
++        } else {
++            variant &= ~XENOS_PS_MASK0;
 +        }
 +    }
 +    const XsdkShader* pixel = &mPixelShaders[variant];
@@ -2100,6 +2156,12 @@ index 0000000..14f9376
 +            xsdk_gpu_set_texture(t == 0 ? FAST3D_V0_FRAG_SAMPLER_0_0 : FAST3D_V0_FRAG_SAMPLER_0_1, &x->texture,
 +                                 &x->sampler);
 +        }
++    }
++    if (mask0) {
++        xsdk_gpu_set_texture(FAST3D_V0_FRAG_SAMPLER_0_2, &mask0->texture, &mask0->sampler);
++        // Without a blend the shader weighs it by 0 (opts1.w).
++        const XenosTexture* b = blend0 ? blend0 : &Texture(mWhiteTexture);
++        xsdk_gpu_set_texture(FAST3D_V0_FRAG_SAMPLER_0_3, &b->texture, &b->sampler);
 +    }
 +
 +    const uint32_t bytes = (uint32_t)(buf_vbo_len * sizeof(float));
@@ -2178,9 +2240,45 @@ index 0000000..14f9376
 +// ---------------------------------------------------------------------------------------------------------------
 +// Frames
 +
++void GfxRenderingAPIXenos::TimingOpenGate() {
++    if (!mTimingGateClosed) {
++        return;
++    }
++    mTimingMem[0] = mTimingTag;
++    __asm__ volatile("sync" ::: "memory");
++    mTimingGateClosed = false;
++}
++
++void GfxRenderingAPIXenos::TimingRead() {
++    if (!mTimingPending || !xsdk_gpu_fence_done(mTimingFence)) {
++        return;
++    }
++    mTimingPending = false;
++    const uint64_t start = xsdk_gpu_clock_value(mTimingMem + 4);
++    const uint64_t end = xsdk_gpu_clock_value(mTimingMem + 8);
++    if (end <= start) {
++        return;
++    }
++    const double ms = (double)(end - start) / 498.75 / 1000.0;
++    mTimingSamples++;
++    mTimingSumMs += ms;
++    mTimingMaxMs = std::max(mTimingMaxMs, ms);
++}
++
 +void GfxRenderingAPIXenos::StartFrame() {
 +    mFrameCount++;
 +    mDrawsThisFrame = 0;
++    if (mTimingMem && !mTimingPending && !mTimingGateClosed && !Tracing() && mFrame % kTimingEvery == kTimingEvery / 2) {
++        mTimingTag++;
++        for (int i = 4; i < 12; i++) {
++            mTimingMem[i] = 0;
++        }
++        __asm__ volatile("sync" ::: "memory");
++        xsdk_gpu_wait_word(xsdk_gpu_address(mTimingMem), mTimingTag);
++        xsdk_gpu_write_clock(xsdk_gpu_address(mTimingMem + 4), false);
++        mTimingGateClosed = true;
++        mTimingValid = true;
++    }
 +    // Frames 1500 and 3000 (the title screen) capture themselves; Back+LB captures any other.
 +    if (mFrame == 1500 || mFrame == 3000) {
 +        gXenosCaptureRequest = true;
@@ -2265,7 +2363,17 @@ index 0000000..14f9376
 +        mBoundDirty = true;
 +        ResolveBound(true);
 +    }
++    bool timed = false;
++    if (mTimingGateClosed) {
++        // Everything the frame draws is queued: the clock once the GPU has done it, then let the GPU go.
++        xsdk_gpu_write_clock(xsdk_gpu_address(mTimingMem + 8), true);
++        timed = mTimingValid;
++        mTimingDraws = (uint32_t)mDrawsThisFrame;
++        TimingOpenGate();
++    }
 +    uint32_t address = 0;
++    // Waits for a front buffer to come off screen: at 60 fps, the vblank.
++    Oot360_Phase("xenos: present wait");
 +    if (NT_SUCCESS(xsdk_present_begin(&address, kBeginTimeoutMs))) {
 +        Trace("present into 0x%08X", (unsigned)address);
 +        xsdk_gpu_resolve(address, mFramebuffers[0].width, mFramebuffers[0].height, 0xFF000000);
@@ -2285,6 +2393,11 @@ index 0000000..14f9376
 +    ResetDrawState();
 +
 +    const uint32_t fence = xsdk_gpu_fence();
++    if (timed) {
++        mTimingPending = true;
++        mTimingFence = fence;
++    }
++    TimingRead();
 +    mFrameFence[mRingIndex] = fence;
 +    mFenceOfFrame[mFrame] = fence;
 +    mFrame++;
@@ -2323,6 +2436,15 @@ index 0000000..14f9376
 +            gOot360Prof[i] = 0;
 +        }
 +        xsdk_log_write("xenos: interpreter ms a frame:%s", line);
++        if (mTimingSamples) {
++            xsdk_log_write("xenos: GPU ms a frame (the GPU alone, %u frames): %.2f average, %.2f most; %u draws in the "
++                           "last one timed",
++                           (unsigned)mTimingSamples, mTimingSumMs / mTimingSamples, mTimingMaxMs,
++                           (unsigned)mTimingDraws);
++            mTimingSamples = 0;
++            mTimingSumMs = 0.0;
++            mTimingMaxMs = 0.0;
++        }
 +        mLastStats = ps;
 +        mLastLogTime = now;
 +        mWaitUs = 0;
@@ -2495,16 +2617,16 @@ index 0000000..14f9376
 +#endif
 diff --git a/src/fast/backends/xenos/fast3d.frag b/src/fast/backends/xenos/fast3d.frag
 new file mode 100644
-index 0000000..77f1b76
+index 0000000..2df6a20
 --- /dev/null
 +++ b/src/fast/backends/xenos/fast3d.frag
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,158 @@
 +#version 450
 +// Fast3D pixel shader template for the Xenos backend (gfx_xenos.cpp). CMake writes variants of it with defines
 +// after the #version line (src/fast/CMakeLists.txt):
 +//   TP0, TP1  three-point filtering of texture 0, 1      CYC2   the second combiner cycle
 +//   KILL      texture edge / alpha threshold may discard  NOISE  the combiner reads noise or dithers alpha
-+//   T0, T1    the combiner reads texture 0, 1
++//   T0, T1    the combiner reads texture 0, 1             MASK0  texture 0 has a mask (and maybe a blend) over it
 +// It follows libultraship's default.shader.glsl: per cycle, (a - b) * c + d for colour and alpha, then fog, texture
 +// edge, noise, grayscale, alpha threshold and invisible. xost lowers no function calls and no discard beside another
 +// branch, so the shader is branch-free, each of a - b, c and d a weighted sum of the combiner's sources with the
@@ -2533,13 +2655,18 @@ index 0000000..77f1b76
 +
 +layout(set = 0, binding = 0) uniform sampler2D u_tex0;
 +layout(set = 0, binding = 1) uniform sampler2D u_tex1;
++// Ship of Harkinian's blended textures (Gfx_RegisterBlendedTexture): where the mask's alpha is set, texture 0 shows
++// the blend texture, or nothing (libultraship's default.shader.glsl, o_masks and o_blend). The pause screen's dungeon
++// maps colour the rooms seen this way.
++layout(set = 0, binding = 2) uniform sampler2D u_mask0;
++layout(set = 0, binding = 3) uniform sampler2D u_blend0;
 +
 +// XenosPixelConstants in gfx_xenos.h. sizes and misc change a draw, the rest with the combiner.
 +layout(push_constant) uniform Push {
 +	vec4 sizes;    // texture 0 width, height, texture 1 width, height
 +	vec4 misc;     // frame count, noise scale, cycle 2 alpha wrap (0 narrow, 1 wide), cycle 2 colour wrap
 +	vec4 opts0;    // alpha, fog, texture edge, noise
-+	vec4 opts1;    // alpha threshold, invisible, grayscale, unused
++	vec4 opts1;    // alpha threshold, invisible, grayscale, texture 0's blend (1) or none (0) under its mask
 +	vec4 clamps;   // clamp s0, t0, s1, t1: 0 or 1
 +	// Operand o (0 a - b, 1 c, 2 d of cycle 1; 3 to 5 cycle 2's), source s: w[o * 6 + s], s 0 texel0, 1 texel0
 +	// alpha, 2 texel1, 3 texel1 alpha, 4 the first cycle's result, 5 noise.
@@ -2591,6 +2718,9 @@ index 0000000..77f1b76
 +	THREE_POINT(t0, u_tex0, uv0, size0)
 +#else
 +	vec4 t0 = texture(u_tex0, uv0);
++#endif
++#ifdef MASK0
++	t0 = mix(t0, texture(u_blend0, uv0) * pc.opts1.w, texture(u_mask0, uv0).a);
 +#endif
 +#endif
 +#ifdef T1
