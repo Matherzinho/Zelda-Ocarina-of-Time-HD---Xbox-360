@@ -51,8 +51,9 @@ authors and stays on your own machines). `tools/hdpack`:
 - `make_pt_font_fix.py`: `C2 PT-BR Font Fix.o2r`, the Portuguese letters the packs put in other slots than the
   translated ROM, so the HD font writes Á, Õ, Ü, Ú and ü.
 
-The game loads them by name (a later archive wins); the archives are made so that their order doesn't matter beyond
-that. The archives with "PT-BR" in the name load only with the text in Portuguese. An HD texture still loading is
+The game loads them in their names' order, ignoring case (a later name wins: A, A1, A2, B, B1, C, C1, C2, Z), whatever
+order an earlier run saved, so files can be taken out and copied back freely (since test 22). The archives with
+"PT-BR" in the name ("pt_br", "ptbr" too, in any case) load only with the text in Portuguese. An HD texture still loading is
 drawn as the game's own until it's there, so a frame never waits for it, and so when a frame has already spent its
 share (2 ms) on sending HD textures to the GPU: an area full of new textures turns HD over its first frames instead of
 stalling.

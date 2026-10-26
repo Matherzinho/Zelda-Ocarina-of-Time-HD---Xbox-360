@@ -266,6 +266,10 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
     frame on the game thread); the HD import boost counted down with a compare-exchange, so a boost the game asks for
     meanwhile isn't lost; the rooms a mod replaces or adds have their object lists loaded ahead too (none in the
     current packs).
+  - The mods load in their names' order on the console (ignoring case), whatever the saved list says: Ship of
+    Harkinian keeps the list's order and puts a file it hasn't seen at the end, so after a run with only the 4x
+    patches (the user had emptied the mods folder) the 2x packs copied back would have loaded over their own patches
+    (2x interface and Link, the Portuguese letters wrong again, the text's Xbox button glyphs gone).
   HD pack (tools/hdpack, the user's PC only): make_hd_patch.py takes the interface's (4x, up to 1024) and Link's (4x,
   up to 512) textures from the original mods as patches over the 2x pack: "A2 Interface 4x" (1093 textures), "B1 Link
   4x" (24), "C1 PT-BR Interface 4x" (627; EduardoA's quest icons and key counter were 937x937 texels for 24x24 and

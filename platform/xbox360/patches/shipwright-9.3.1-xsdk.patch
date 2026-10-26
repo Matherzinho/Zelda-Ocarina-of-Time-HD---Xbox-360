@@ -258,7 +258,7 @@ index ee66375f..1f15a179 100644
      vtx = nullptr;
      BuildVertices();
 diff --git a/soh/soh/Enhancements/mod_menu.cpp b/soh/soh/Enhancements/mod_menu.cpp
-index 391e374d..50bde380 100644
+index 391e374d..fc7af4e0 100644
 --- a/soh/soh/Enhancements/mod_menu.cpp
 +++ b/soh/soh/Enhancements/mod_menu.cpp
 @@ -6,6 +6,7 @@
@@ -302,7 +302,35 @@ index 391e374d..50bde380 100644
  #define CVAR_ENABLED_MODS_NAME CVAR_SETTING("EnabledMods")
  #define CVAR_ENABLED_MODS_DEFAULT ""
  #define CVAR_ENABLED_MODS_VALUE CVarGetString(CVAR_ENABLED_MODS_NAME, CVAR_ENABLED_MODS_DEFAULT)
-@@ -257,6 +284,15 @@ void UpdateModFiles(bool init = false, bool reset = false) {
+@@ -253,10 +280,43 @@ void UpdateModFiles(bool init = false, bool reset = false) {
+                 }
+                 tempMods.clear();
+             }
++#ifdef __XSDK__
++            // oot360: on the console the mods load in their names' order (ignoring case; later names win), whatever
++            // order the list saved. The console's packs are named for it (A, A1, A2, B, B1, C, C1, C2, Z: each patch
++            // after what it patches), and the saved order goes wrong whenever files come and go: a pack copied back
++            // after a run without it joins the list at its end, over its own patches. There's no mouse here to drag
++            // the list back into order with.
++            {
++                auto byName = [](const std::string& a, const std::string& b) {
++                    const size_t n = std::min(a.size(), b.size());
++                    for (size_t i = 0; i < n; i++) {
++                        const int ca = std::tolower((unsigned char)a[i]);
++                        const int cb = std::tolower((unsigned char)b[i]);
++                        if (ca != cb) {
++                            return ca < cb;
++                        }
++                    }
++                    return a.size() != b.size() ? a.size() < b.size() : a < b;
++                };
++                if (!std::is_sorted(enabledModFiles.begin(), enabledModFiles.end(), byName)) {
++                    std::sort(enabledModFiles.begin(), enabledModFiles.end(), byName);
++                    changed = true;
++                }
++            }
++#endif
+             if (init) {
                  std::vector<std::string> enabledTemp(enabledModFiles);
                  for (std::string mod : enabledTemp) {
                      if (filePaths.contains(mod)) {
