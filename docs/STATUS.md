@@ -244,8 +244,10 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
     interface's pictures only some screens show (pause names and maps, title cards, file select) while short. Never:
     Link's objects, the gameplay keeps, the get-item models and any directory with a patched display list.
   - The two graphics pools held 48 MB (a million commands each buffer, "basically impossible to overflow"): 12 MB now
-    (256 K commands, 40 times the N64's largest); graph.c logs the most each buffer took and any frame that ran out
-    (as on the N64, not drawn).
+    (256 K commands, 40 times the N64's largest); graph.c logs the most each buffer took and any frame that ran out.
+    A frame that runs out isn't drawn, as on the N64: it isn't handed to the render thread (which, a frame behind,
+    would still be drawing the pool the next frame refills), and an allocation that doesn't fit is kept inside its
+    own pool instead of running into the other one (review of test 22).
   - FXAA's tag in graph.c for play frames that draw the world (Play_Draw), none for the pause menu's
     (KaleidoScopeCall_Draw); the pause menu's background copy waits for the render thread instead of being taken again
     every frame; the sky's display lists rebuilt with the render thread idle (Skybox_Update).
@@ -256,8 +258,14 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
     multi-viewports, keyboard/mouse/gyro/LED in the controller window, and the developer windows that need a keyboard
     or are for the renderer's developers (console, hook debugger, display list and message viewers, Gfx debugger,
     popout menu, resource logging); FPS up to 60; the texture filter applies without a restart.
-  - The Portuguese texture packs ("PT-BR" in their names) mount only with the game's text in Portuguese.
+  - The Portuguese texture packs ("PT-BR", "pt_br", "ptbr"... in their names, any case) mount only with the game's
+    text in Portuguese.
   - Fixed: XML sound fonts' envelopes byte-swapped on big-endian (as zeldaMM).
+  - From the review of test 22: the options the menus no longer show are turned off at start if an earlier test
+    saved them on (popout menu, resource logging, the removed developer windows, which would also have kept every
+    frame on the game thread); the HD import boost counted down with a compare-exchange, so a boost the game asks for
+    meanwhile isn't lost; the rooms a mod replaces or adds have their object lists loaded ahead too (none in the
+    current packs).
   HD pack (tools/hdpack, the user's PC only): make_hd_patch.py takes the interface's (4x, up to 1024) and Link's (4x,
   up to 512) textures from the original mods as patches over the 2x pack: "A2 Interface 4x" (1093 textures), "B1 Link
   4x" (24), "C1 PT-BR Interface 4x" (627; EduardoA's quest icons and key counter were 937x937 texels for 24x24 and
