@@ -275,14 +275,15 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
   select's "Certeza?" from ptbr.o2r. The Xbox 360 button glyphs at 4x too (tools/xboxbuttons), left out of A2.
 
 ## Not done yet / known gaps
-- Title screen 2-cycle effect, logo and text; controller input (test 6); 60 fps.
+(Done since this list began: the title's 2-cycle effect, logo and text and the controller in tests 6-7; 60 fps at 720p
+in test 12; the console's menu defaults in test 22.)
 - Depth readback (`GetPixelDepth` answers "far": lens flare occlusion is off); MSAA; texture 1's mask/blend.
 - Combiner shader: general (weights), split between the vertex and pixel shaders since test 12.
 - Big-endian loading of `.o2r` resources made by torch on a little-endian PC is untested (Wii U used the older
   OTR pipeline).
-- PT-BR: dialogue text, font and the translated pictures (tools/ptbr); whether the text shows on the console is
-  still to be seen (test 11 showed English). Redux features as options.
-- 4:3 option, widescreen FOV, menu defaults for the console.
+- PT-BR: the dialogue text, font and translated pictures (tools/ptbr) show on the console since test 12; Redux
+  features as options are still to do.
+- 4:3 option, widescreen FOV.
 
 ## User data (local only, verified 2026-10-24)
 | File | SHA-1 (z64 order) | Identity |
