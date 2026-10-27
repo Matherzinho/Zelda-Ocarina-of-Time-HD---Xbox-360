@@ -277,6 +277,21 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
   Fix": with the packs, Portuguese text showed Î for Á, Á for Õ, û for Ü and ü, ü for Ú (EduardoA's font puts its
   letters in other slots than the translated ROM's); the right letters from the packs' own glyphs at 4x, and the file
   select's "Certeza?" from ptbr.o2r. The Xbox 360 button glyphs at 4x too (tools/xboxbuttons), left out of A2.
+- **Test 23:** (built, not yet run; Xenia couldn't be started unattended) test 22 closed soon after starting on the
+  console (user, 2026-10-26) and no log came back. A start-up guard (MemTrace.c, Oot360_BootGuardStart): a count in
+  game:\oot360-boot.txt (cache:\ where game:\ is read-only) goes up at every start and back to 0 when a save file has
+  been played for a minute (Play_Update, fileNum 0-2, 1200 updates), after ten minutes running or when Back+Start quits
+  (SohMain after Main). A start finding 1 runs in safe mode 1 (no loading ahead, frames on the game thread), 2 or more in
+  safe mode 2 (also no mods, no FXAA, no mip levels), logged and shown as a notification; nothing is saved to the
+  configuration, so the next clean start is normal again. HD textures compressed for Xenos: TEX_FLAG_XENOS_DXT1/5 in a
+  texture resource's flags (DXT blocks in .dds order, every level to 1x1, ImageDataSize their total, Width/Height and the
+  scales as for RGBA32 of that size); interpreter.cpp's ImportTextureDxt uploads a whole load as is
+  (gfx_xenos.cpp, UploadTextureDxt) and decodes a partial one to RGBA for the raw path. tools/hdpack/make_dxt_pack.py
+  with dxtenc.c (stb_dxt, high quality, DXT1 when opaque) makes "A0 Mundo DXT.o2r" from the console pack's world
+  textures (not the interface, Link or the skies): 8,614 textures, 281 MB of RGBA as 57 MB with their levels, a 39 MB
+  archive, on the user's PC. Measured on the user's 3DS Experience archives: the world textures above 2x (2,375) are
+  already at their full 8x-16x in the console pack and the rest are 2x or less in the mod itself, so there is nothing
+  sharper to restore for the areas; the DXT pack is about memory.
 
 ## Not done yet / known gaps
 (Done since this list began: the title's 2-cycle effect, logo and text and the controller in tests 6-7; 60 fps at 720p
