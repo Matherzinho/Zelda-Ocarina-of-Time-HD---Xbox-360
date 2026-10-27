@@ -258,7 +258,7 @@ index ee66375f..1f15a179 100644
      vtx = nullptr;
      BuildVertices();
 diff --git a/soh/soh/Enhancements/mod_menu.cpp b/soh/soh/Enhancements/mod_menu.cpp
-index 391e374d..fc7af4e0 100644
+index 391e374d..5eb82254 100644
 --- a/soh/soh/Enhancements/mod_menu.cpp
 +++ b/soh/soh/Enhancements/mod_menu.cpp
 @@ -6,6 +6,7 @@
@@ -269,12 +269,13 @@ index 391e374d..fc7af4e0 100644
  
  #include "mod_menu.h"
  #include "soh/Enhancements/audio/OotrsArchive.h"
-@@ -50,6 +51,32 @@ extern std::shared_ptr<SohMenu> mSohMenu;
+@@ -50,6 +51,33 @@ extern std::shared_ptr<SohMenu> mSohMenu;
  static WidgetInfo enableModsWidget;
  static WidgetInfo tabHotkeyWidget;
  
 +#ifdef __XSDK__
 +extern bool gOot360Portuguese; // soh/OTRGlobals.cpp: the game's text is in Portuguese
++extern "C" int Oot360_SafeLevel(void); // platform/xbox360/MemTrace.c: the start-up guard
 +
 +// oot360: whether a mod's name says it's in Brazilian Portuguese: "PT-BR", "pt_br", "Pt Br", "PTBR"..., in any case,
 +// not inside a word ("Script Brush" isn't).
@@ -302,7 +303,7 @@ index 391e374d..fc7af4e0 100644
  #define CVAR_ENABLED_MODS_NAME CVAR_SETTING("EnabledMods")
  #define CVAR_ENABLED_MODS_DEFAULT ""
  #define CVAR_ENABLED_MODS_VALUE CVarGetString(CVAR_ENABLED_MODS_NAME, CVAR_ENABLED_MODS_DEFAULT)
-@@ -253,10 +280,43 @@ void UpdateModFiles(bool init = false, bool reset = false) {
+@@ -253,10 +281,49 @@ void UpdateModFiles(bool init = false, bool reset = false) {
                  }
                  tempMods.clear();
              }
@@ -340,6 +341,12 @@ index 391e374d..fc7af4e0 100644
 +                        // OTRGlobals.cpp); it stays on the list.
 +                        if (!gOot360Portuguese && Oot360_IsPortugueseMod(mod)) {
 +                            SPDLOG_INFO("oot360: {} left out: the game's text isn't in Portuguese", mod);
++                            continue;
++                        }
++                        // oot360 test 23: safe mode 2 of the start-up guard (platform/xbox360/MemTrace.c) starts
++                        // without the mods; they stay on the list for the next normal start.
++                        if (Oot360_SafeLevel() >= 2) {
++                            SPDLOG_INFO("oot360: {} left out: safe mode 2", mod);
 +                            continue;
 +                        }
 +#endif
@@ -414,10 +421,18 @@ index d26807a0..0fcbcc52 100644
          Audio_PlaySfxGeneral(NA_SE_SY_METRONOME, &gSfxDefaultPos, 4, &gSfxDefaultFreqAndVolScale,
                               &gSfxDefaultFreqAndVolScale, &gSfxDefaultReverb);
 diff --git a/soh/soh/OTRGlobals.cpp b/soh/soh/OTRGlobals.cpp
-index 67bd1777..7eb433fc 100644
+index 67bd1777..6674f5da 100644
 --- a/soh/soh/OTRGlobals.cpp
 +++ b/soh/soh/OTRGlobals.cpp
-@@ -56,7 +56,7 @@
+@@ -43,6 +43,7 @@
+ #include "frame_interpolation.h"
+ #include "SohGui/SohMenu.h"
+ #include "SohGui/SohGui.hpp"
++#include "soh/Notification/Notification.h" // oot360 test 23: the safe mode notice
+ #include "variables.h"
+ #include "z64.h"
+ #include "macros.h"
+@@ -56,7 +57,7 @@
  #include <fast/Fast3dGui.h>
  #include <fast/debug/GfxDebugger.h>
  
@@ -426,7 +441,7 @@ index 67bd1777..7eb433fc 100644
  #include "Extractor/Extract.h"
  #endif
  
-@@ -76,15 +76,37 @@
+@@ -76,15 +77,39 @@
  #endif
  
  #include <functions.h>
@@ -450,6 +465,8 @@ index 67bd1777..7eb433fc 100644
 +extern "C" void Oot360_FindModelDirectories(void); // oot360: below, with the loaders
 +// Waits until the render thread has drawn the frame handed over (Graph_ProcessGfxCommands); nothing elsewhere.
 +extern "C" void Oot360_RenderWait(void);
++extern "C" int Oot360_SafeLevel(void);     // platform/xbox360/MemTrace.c: the start-up guard
++extern "C" int Oot360_BootFailures(void);
  #include "Enhancements/item-tables/ItemTableManager.h"
  #include "Enhancements/Restorations/GetItemManipulation.h"
  #include "Enhancements/Lang/Lang.h"
@@ -464,7 +481,7 @@ index 67bd1777..7eb433fc 100644
  #include "Enhancements/game-interactor/GameInteractor.h"
  #include "Enhancements/randomizer/draw.h"
  #include <libultraship/controller/controldeck/ControlDeck.h>
-@@ -93,6 +115,12 @@
+@@ -93,6 +118,12 @@
  // Resource Types/Factories
  #include "soh/resource/type/SohResourceType.h"
  #include "soh/resource/type/Skeleton.h"
@@ -477,7 +494,7 @@ index 67bd1777..7eb433fc 100644
  #include <ship/resource/factory/BlobFactory.h>
  #include <fast/resource/factory/DisplayListFactory.h>
  #include <fast/resource/factory/MatrixFactory.h>
-@@ -138,9 +166,11 @@ ItemTableManager* ItemTableManager::Instance;
+@@ -138,9 +169,11 @@ ItemTableManager* ItemTableManager::Instance;
  GameInteractor* GameInteractor::Instance;
  AudioCollection* AudioCollection::Instance;
  SpeechSynthesizer* SpeechSynthesizer::Instance;
@@ -489,7 +506,7 @@ index 67bd1777..7eb433fc 100644
  
  extern "C" char** cameraStrings;
  
-@@ -325,7 +355,13 @@ OTRGlobals::OTRGlobals() {
+@@ -325,7 +358,13 @@ OTRGlobals::OTRGlobals() {
          fontStandard = CreateFontWithSize(16.0f, "fonts/Montserrat-Regular.ttf");
          fontStandardLarger = CreateFontWithSize(20.0f, "fonts/Montserrat-Regular.ttf");
          fontStandardLargest = CreateFontWithSize(24.0f, "fonts/Montserrat-Regular.ttf");
@@ -503,7 +520,7 @@ index 67bd1777..7eb433fc 100644
          ImGui::GetIO().FontDefault = fontStandardLarger;
      }
  
-@@ -408,6 +444,49 @@ static bool RemoveArchiveAcrossAppDirs(const std::string& fileName) {
+@@ -408,6 +447,49 @@ static bool RemoveArchiveAcrossAppDirs(const std::string& fileName) {
      return !std::filesystem::exists(Ship::Context::LocateFileAcrossAppDirs(fileName, appShortName));
  }
  
@@ -553,7 +570,7 @@ index 67bd1777..7eb433fc 100644
  void OTRGlobals::RunExtract(int argc, char* argv[]) {
      bool extractDone = false;
      ExtractSteps extractStep = ES_PORT_ARCHIVE;
-@@ -821,6 +900,7 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
+@@ -821,6 +903,7 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
      Ship::WiiU::Init(appShortName);
  #endif
  }
@@ -561,7 +578,7 @@ index 67bd1777..7eb433fc 100644
  
  void InitGfxDebugger() {
      auto dbg =
-@@ -837,6 +917,50 @@ void InitGfxDebugger() {
+@@ -837,6 +920,50 @@ void InitGfxDebugger() {
      }
  }
  
@@ -612,7 +629,7 @@ index 67bd1777..7eb433fc 100644
  void OTRGlobals::Initialize() {
      std::string mqPath = Ship::Context::LocateFileAcrossAppDirs("oot-mq.o2r", appShortName);
      if (std::filesystem::exists(mqPath)) {
-@@ -846,6 +970,49 @@ void OTRGlobals::Initialize() {
+@@ -846,6 +973,49 @@ void OTRGlobals::Initialize() {
      if (std::filesystem::exists(ootPath)) {
          context->GetResourceManager()->GetArchiveManager()->AddArchive(ootPath);
      }
@@ -662,7 +679,7 @@ index 67bd1777..7eb433fc 100644
  
      std::unordered_set<uint32_t> ValidHashes = {
          OOT_PAL_MQ,     OOT_NTSC_JP_MQ, OOT_NTSC_US_MQ, OOT_PAL_GC_MQ_DBG, OOT_NTSC_US_10,
-@@ -1066,7 +1233,22 @@ int AudioPlayer_Buffered(void);
+@@ -1066,7 +1236,22 @@ int AudioPlayer_Buffered(void);
  extern "C" int AudioPlayer_GetDesiredBuffered(void);
  std::unordered_map<std::string, ExtensionEntry> ExtensionCache;
  
@@ -685,7 +702,7 @@ index 67bd1777..7eb433fc 100644
      while (audio.running) {
          {
              std::unique_lock<std::mutex> Lock(audio.mutex);
-@@ -1098,6 +1280,9 @@ void OTRAudio_Thread() {
+@@ -1098,6 +1283,9 @@ void OTRAudio_Thread() {
                                             num_audio_samples);
          }
  
@@ -695,7 +712,7 @@ index 67bd1777..7eb433fc 100644
          AudioPlayer_Play((u8*)audio_buffer,
                           num_audio_samples * (sizeof(int16_t) * NUM_AUDIO_CHANNELS * AUDIO_FRAMES_PER_UPDATE));
  
-@@ -1106,6 +1291,31 @@ void OTRAudio_Thread() {
+@@ -1106,6 +1294,31 @@ void OTRAudio_Thread() {
      }
  }
  
@@ -727,7 +744,7 @@ index 67bd1777..7eb433fc 100644
  void OTRAudio_Init() {
      // Precache all our samples, sequences, etc...
      ResourceMgr_LoadDirectory("audio");
-@@ -1506,7 +1716,11 @@ OTRVersion DetectOTRVersion(std::string fileName, bool isMQ) {
+@@ -1506,7 +1719,11 @@ OTRVersion DetectOTRVersion(std::string fileName, bool isMQ) {
  }
  
  extern "C" void Messagebox_ShowErrorBox(char* title, char* body) {
@@ -739,7 +756,7 @@ index 67bd1777..7eb433fc 100644
  }
  
  bool VerifyArchiveVersion(OTRVersion version) {
-@@ -1547,9 +1761,39 @@ static void SetAppImageHome() {
+@@ -1547,9 +1764,39 @@ static void SetAppImageHome() {
  }
  #endif
  
@@ -779,7 +796,7 @@ index 67bd1777..7eb433fc 100644
  #endif
      OTRGlobals::Instance = new OTRGlobals();
      OTRGlobals::Instance->RunExtract(argc, argv);
-@@ -1563,9 +1807,31 @@ extern "C" void InitOTR(int argc, char* argv[]) {
+@@ -1563,9 +1810,41 @@ extern "C" void InitOTR(int argc, char* argv[]) {
      std::shared_ptr<Ship::Config> conf = OTRGlobals::Instance->context->GetConfig();
      SOH::RegisterVersionUpdaters(conf.get());
      conf->RunVersionUpdates();
@@ -807,11 +824,21 @@ index 67bd1777..7eb433fc 100644
 +    Ship::Context::GetRawInstance()->GetResourceManager()->Oot360_ForgetMissing();
 +    // and the mods' model directories, whose textures have no stand-in (further down)
 +    Oot360_FindModelDirectories();
++    // oot360 test 23: the start-up guard (platform/xbox360/MemTrace.c) said the last starts didn't get to play
++    if (Oot360_SafeLevel() > 0) {
++        SPDLOG_WARN("oot360: safe mode {} after {} start(s) that didn't get to play", Oot360_SafeLevel(),
++                    Oot360_BootFailures());
++        Notification::Emit({ .prefix = "Modo seguro " + std::to_string(Oot360_SafeLevel()),
++                             .message = Oot360_SafeLevel() == 1
++                                            ? "(o jogo fechou da ultima vez): sem carregar areas antes"
++                                            : "(o jogo fechou de novo): sem mods, sem carregar areas antes",
++                             .remainingTime = 20.0f });
++    }
 +#endif
  
      AudioCollection::Instance = new AudioCollection();
      ActorDB::Instance = new ActorDB();
-@@ -1580,14 +1846,19 @@ extern "C" void InitOTR(int argc, char* argv[]) {
+@@ -1580,14 +1859,19 @@ extern "C" void InitOTR(int argc, char* argv[]) {
  #endif
      SpeechSynthesizer::Instance->Init();
  
@@ -831,7 +858,7 @@ index 67bd1777..7eb433fc 100644
      DebugConsole_Init();
  
      // #region SOH [Randomizer] TODO: Remove these and refactor spoiler file handling for randomizer
-@@ -1597,6 +1868,7 @@ extern "C" void InitOTR(int argc, char* argv[]) {
+@@ -1597,6 +1881,7 @@ extern "C" void InitOTR(int argc, char* argv[]) {
  
      Ship::Context::GetRawInstance()->GetFileDropMgr()->RegisterDropHandler(SoH_HandleConfigDrop);
  
@@ -839,7 +866,7 @@ index 67bd1777..7eb433fc 100644
      RegisterImGuiItemIcons();
  
      time_t now = time(NULL);
-@@ -1608,6 +1880,7 @@ extern "C" void InitOTR(int argc, char* argv[]) {
+@@ -1608,6 +1893,7 @@ extern "C" void InitOTR(int argc, char* argv[]) {
      }
  
      srand(static_cast<unsigned int>(now));
@@ -847,7 +874,7 @@ index 67bd1777..7eb433fc 100644
      SDLNet_Init();
      if (CVarGetInteger(CVAR_REMOTE_CROWD_CONTROL("Enabled"), 0)) {
          CrowdControl::Instance->Enable();
-@@ -1618,9 +1891,13 @@ extern "C" void InitOTR(int argc, char* argv[]) {
+@@ -1618,9 +1904,13 @@ extern "C" void InitOTR(int argc, char* argv[]) {
      if (CVarGetInteger(CVAR_REMOTE_ANCHOR("Enabled"), 0)) {
          Anchor::Instance->Enable();
      }
@@ -861,7 +888,7 @@ index 67bd1777..7eb433fc 100644
      Rando::StaticData::InitHashMaps();
      OTRGlobals::Instance->gRandoContext->AddExcludedOptions();
  }
-@@ -1630,9 +1907,18 @@ extern "C" void SaveManager_ThreadPoolWait() {
+@@ -1630,9 +1920,18 @@ extern "C" void SaveManager_ThreadPoolWait() {
  }
  
  extern "C" void DeinitOTR() {
@@ -880,7 +907,7 @@ index 67bd1777..7eb433fc 100644
      if (CVarGetInteger(CVAR_REMOTE_CROWD_CONTROL("Enabled"), 0)) {
          CrowdControl::Instance->Disable();
      }
-@@ -1643,6 +1929,7 @@ extern "C" void DeinitOTR() {
+@@ -1643,6 +1942,7 @@ extern "C" void DeinitOTR() {
          Anchor::Instance->Disable();
      }
      SDLNet_Quit();
@@ -888,7 +915,7 @@ index 67bd1777..7eb433fc 100644
  
      // Destroying gui here because we have shared ptrs to LUS objects which output to SPDLOG which is destroyed before
      // these shared ptrs.
-@@ -1817,8 +2104,138 @@ void RunCommands(Gfx* Commands, int time, int step, int denom, int count) {
+@@ -1817,8 +2117,139 @@ void RunCommands(Gfx* Commands, int time, int step, int denom, int count) {
      ImGui::PopStyleColor();
  }
  
@@ -989,7 +1016,8 @@ index 67bd1777..7eb433fc 100644
 +// debugger, no render thread, or the player's choice (gOot360.RenderThread 0).
 +static bool Oot360_DrawOnGameThread(bool menuOpen) {
 +    return menuOpen || SohGui::GameStateWindowVisible() || GfxDebuggerIsDebugging() || sRenderThreadFailed ||
-+           !CVarGetInteger("gOot360.RenderThread", 1) || CVarGetInteger(CVAR_DEVELOPER_TOOLS("ColViewer.Enabled"), 0) ||
++           !CVarGetInteger("gOot360.RenderThread", 1) || Oot360_SafeLevel() > 0 ||
++           CVarGetInteger(CVAR_DEVELOPER_TOOLS("ColViewer.Enabled"), 0) ||
 +           NameTag_AnyActive();
 +}
 +
@@ -1027,7 +1055,7 @@ index 67bd1777..7eb433fc 100644
      {
          std::unique_lock<std::mutex> Lock(audio.mutex);
          audio.processing = true;
-@@ -1865,7 +2282,80 @@ extern "C" void Graph_ProcessGfxCommands(Gfx* commands) {
+@@ -1865,7 +2296,81 @@ extern "C" void Graph_ProcessGfxCommands(Gfx* commands) {
          count = 1;
      }
  
@@ -1060,7 +1088,8 @@ index 67bd1777..7eb433fc 100644
 +        }
 +        OOT360_PHASE("graph: hand over the frame");
 +        const bool menuOpen = Ship::Context::GetRawInstance()->GetWindow()->GetGui()->GetMenuOrMenubarVisible();
-+        if (!sRenderThreadStarted && !sRenderThreadFailed && !menuOpen && CVarGetInteger("gOot360.RenderThread", 1)) {
++        if (!sRenderThreadStarted && !sRenderThreadFailed && !menuOpen && CVarGetInteger("gOot360.RenderThread", 1) &&
++            Oot360_SafeLevel() == 0) {
 +            sRenderThreadStarted = true;
 +            // 16 MB of stack, as the game thread has (src/code/main.c): ImGui's font atlas is built on it.
 +            pthread_attr_t attr;
@@ -1108,7 +1137,7 @@ index 67bd1777..7eb433fc 100644
  
      last_fps = fps;
      last_update_rate = R_UPDATE_RATE;
-@@ -1876,10 +2366,47 @@ extern "C" void Graph_ProcessGfxCommands(Gfx* commands) {
+@@ -1876,10 +2381,47 @@ extern "C" void Graph_ProcessGfxCommands(Gfx* commands) {
              audio.cv_from_thread.wait(Lock);
          }
      }
@@ -1156,7 +1185,7 @@ index 67bd1777..7eb433fc 100644
          Ship::Context::GetRawInstance()->GetResourceManager()->SetAltAssetsEnabled(curAltAssets);
          gfx_texture_cache_clear();
          SOH::SkeletonPatcher::UpdateSkeletons();
-@@ -1892,6 +2419,11 @@ extern "C" void Graph_ProcessGfxCommands(Gfx* commands) {
+@@ -1892,6 +2434,11 @@ extern "C" void Graph_ProcessGfxCommands(Gfx* commands) {
  }
  
  extern "C" void OTRGetPixelDepthPrepare(float x, float y) {
@@ -1168,7 +1197,7 @@ index 67bd1777..7eb433fc 100644
      auto wnd = std::dynamic_pointer_cast<Fast::Fast3dWindow>(Ship::Context::GetRawInstance()->GetWindow());
      if (wnd == nullptr) {
          return;
-@@ -1901,6 +2433,9 @@ extern "C" void OTRGetPixelDepthPrepare(float x, float y) {
+@@ -1901,6 +2448,9 @@ extern "C" void OTRGetPixelDepthPrepare(float x, float y) {
  }
  
  extern "C" uint16_t OTRGetPixelDepth(float x, float y) {
@@ -1178,7 +1207,7 @@ index 67bd1777..7eb433fc 100644
      auto wnd = std::dynamic_pointer_cast<Fast::Fast3dWindow>(Ship::Context::GetRawInstance()->GetWindow());
      if (wnd == nullptr) {
          return 0;
-@@ -1909,6 +2444,562 @@ extern "C" uint16_t OTRGetPixelDepth(float x, float y) {
+@@ -1909,6 +2459,562 @@ extern "C" uint16_t OTRGetPixelDepth(float x, float y) {
      return wnd->GetPixelDepth(x, y);
  }
  
@@ -1488,7 +1517,7 @@ index 67bd1777..7eb433fc 100644
 +}
 +
 +extern "C" void Oot360_Prefetch(const char* directory) {
-+    if (directory == nullptr || directory[0] == '\0' || !CVarGetInteger("gOot360.Prefetch", 1)) {
++    if (directory == nullptr || directory[0] == '\0' || (!CVarGetInteger("gOot360.Prefetch", 1) || Oot360_SafeLevel() > 0)) {
 +        return;
 +    }
 +    auto manager = Ship::Context::GetRawInstance()->GetResourceManager();
@@ -1521,7 +1550,7 @@ index 67bd1777..7eb433fc 100644
 +        return;
 +    }
 +    sTextureDirLastUse[file.substr(0, slash)] = sSceneCount;
-+    if (!CVarGetInteger("gOot360.Prefetch", 1)) {
++    if ((!CVarGetInteger("gOot360.Prefetch", 1) || Oot360_SafeLevel() > 0)) {
 +        return;
 +    }
 +    // its HD version and the N64 one that stands in while it uploads (the loader's own logic)
@@ -1701,7 +1730,7 @@ index 67bd1777..7eb433fc 100644
 +    // The scene's first second and a half, fading in from black: its HD textures go to the GPU then, up to 12 ms a
 +    // frame (libultraship's interpreter.cpp; no frame is drawn while this waits below)
 +    Oot360_BoostHdImports(90);
-+    if (!CVarGetInteger("gOot360.Prefetch", 1)) {
++    if ((!CVarGetInteger("gOot360.Prefetch", 1) || Oot360_SafeLevel() > 0)) {
 +        return;
 +    }
 +    // Up to 1.2 s of the black screen: what isn't loaded by then goes on loading behind the first frames, and the
@@ -1741,7 +1770,7 @@ index 67bd1777..7eb433fc 100644
  extern "C" Sprite* GetSeedTexture(uint8_t index) {
      return OTRGlobals::Instance->gRandoContext->GetSeedTexture(index);
  }
-@@ -2449,6 +3540,9 @@ extern "C" void EntranceTracker_SetLastEntranceOverride(s16 entranceIndex) {
+@@ -2449,6 +3555,9 @@ extern "C" void EntranceTracker_SetLastEntranceOverride(s16 entranceIndex) {
  }
  
  extern "C" void Gfx_RegisterBlendedTexture(const char* name, u8* mask, u8* replacement) {
@@ -1751,7 +1780,7 @@ index 67bd1777..7eb433fc 100644
      if (auto intP = dynamic_pointer_cast<Fast::Fast3dWindow>(Ship::Context::GetRawInstance()->GetWindow())
                          ->GetInterpreterWeak()
                          .lock()) {
-@@ -2459,6 +3553,9 @@ extern "C" void Gfx_RegisterBlendedTexture(const char* name, u8* mask, u8* repla
+@@ -2459,6 +3568,9 @@ extern "C" void Gfx_RegisterBlendedTexture(const char* name, u8* mask, u8* repla
  }
  
  extern "C" void Gfx_UnregisterBlendedTexture(const char* name) {
@@ -1761,7 +1790,7 @@ index 67bd1777..7eb433fc 100644
      if (auto intP = dynamic_pointer_cast<Fast::Fast3dWindow>(Ship::Context::GetRawInstance()->GetWindow())
                          ->GetInterpreterWeak()
                          .lock()) {
-@@ -2469,6 +3566,9 @@ extern "C" void Gfx_UnregisterBlendedTexture(const char* name) {
+@@ -2469,6 +3581,9 @@ extern "C" void Gfx_UnregisterBlendedTexture(const char* name) {
  }
  
  extern "C" void Gfx_TextureCacheDelete(const uint8_t* texAddr) {
@@ -2412,10 +2441,10 @@ index 00000000..60178a3c
 +#endif
 diff --git a/soh/soh/platform/xbox360/MemTrace.c b/soh/soh/platform/xbox360/MemTrace.c
 new file mode 100644
-index 00000000..fb2ef19c
+index 00000000..d37bd753
 --- /dev/null
 +++ b/soh/soh/platform/xbox360/MemTrace.c
-@@ -0,0 +1,243 @@
+@@ -0,0 +1,338 @@
 +#ifdef __XSDK__
 +// Memory diagnostics for the Xbox 360 build: the link wraps malloc, calloc, realloc and memalign
 +// (soh/CMakeLists.txt, -Wl,--wrap=...) and this logs every allocation of 2 MB or more, and every failure, with the
@@ -2628,6 +2657,10 @@ index 00000000..fb2ef19c
 +        if (++beats % 5 == 0) {
 +            LogPhaseTimes();
 +        }
++        if (beats == 300) {
++            void Oot360_BootGuardClean(const char* why);
++            Oot360_BootGuardClean("ten minutes running");
++        }
 +    }
 +    return NULL;
 +}
@@ -2657,6 +2690,97 @@ index 00000000..fb2ef19c
 +    pthread_attr_destroy(&mine);
 +    xsdk_log_write("thread: %p, %u KB of stack: %d", (void*)start, (unsigned)(MIN_STACK >> 10), r);
 +    return r;
++}
++#endif
++
++#ifdef __XSDK__
++// oot360 test 23: a start-up guard. Test 22 closed on the console soon after starting, and a log doesn't always come
++// back, so the game remembers whether its last start got as far as playing: a count in game:\oot360-boot.txt
++// (cache:\ where game:\ can't be written, as in Xenia) goes up at every start and back to 0 once a file has been played
++// for a minute, after ten minutes running, or when Back+Start quits. A start that finds 1 there runs in safe mode 1
++// (no loading ahead, frames drawn on the game thread); 2 or more, safe mode 2 (that, plus no mods, no FXAA, no mip
++// levels). Each step back says so in the log and on screen (OTRGlobals.cpp), and the next clean run returns to normal.
++#include <string.h>
++
++static int sSafeLevel;
++static int sBootPrevious;
++static volatile int sBootClean;
++static const char* sBootPath;
++
++static int ReadBootCount(const char* path) {
++    FILE* f = fopen(path, "rb");
++    if (!f) {
++        return -1;
++    }
++    char text[16] = { 0 };
++    const size_t n = fread(text, 1, sizeof text - 1, f);
++    fclose(f);
++    int count = 0;
++    for (size_t i = 0; i < n && text[i] >= '0' && text[i] <= '9'; i++) {
++        count = count * 10 + (text[i] - '0');
++        if (count > 99) {
++            break;
++        }
++    }
++    return count;
++}
++
++static int WriteBootCount(const char* path, int count) {
++    FILE* f = fopen(path, "wb");
++    if (!f) {
++        return 0;
++    }
++    char text[16];
++    const int n = snprintf(text, sizeof text, "%d\r\n", count);
++    const size_t written = fwrite(text, 1, (size_t)n, f);
++    fclose(f);
++    return written == (size_t)n;
++}
++
++void Oot360_BootGuardStart(void) {
++    static const char* const kPaths[] = { "game:\\oot360-boot.txt", "cache:\\oot360-boot.txt" };
++    int previous = -1;
++    for (int i = 0; i < 2 && previous < 0; i++) {
++        previous = ReadBootCount(kPaths[i]);
++        if (previous >= 0) {
++            sBootPath = kPaths[i];
++        }
++    }
++    if (previous < 0) {
++        previous = 0;
++    }
++    sBootPrevious = previous;
++    sSafeLevel = previous >= 2 ? 2 : previous;
++    // Written where it was found, else the first place that takes it.
++    if (!sBootPath || !WriteBootCount(sBootPath, previous + 1)) {
++        sBootPath = NULL;
++        for (int i = 0; i < 2 && !sBootPath; i++) {
++            if (WriteBootCount(kPaths[i], previous + 1)) {
++                sBootPath = kPaths[i];
++            }
++        }
++    }
++    xsdk_log_write("boot: %d start(s) without a clean run before this one (%s): %s", previous,
++                   sBootPath ? sBootPath : "nowhere to write it",
++                   sSafeLevel == 0   ? "normal start"
++                   : sSafeLevel == 1 ? "SAFE MODE 1: no loading ahead, no render thread"
++                                     : "SAFE MODE 2: no loading ahead, no render thread, no mods, no FXAA, no mip levels");
++}
++
++void Oot360_BootGuardClean(const char* why) {
++    if (__atomic_exchange_n(&sBootClean, 1, __ATOMIC_ACQ_REL)) {
++        return;
++    }
++    const int ok = sBootPath != NULL && WriteBootCount(sBootPath, 0);
++    xsdk_log_write("boot: clean run (%s)%s", why, ok ? "" : ", but the count couldn't be written");
++}
++
++int Oot360_SafeLevel(void) {
++    return sSafeLevel;
++}
++
++int Oot360_BootFailures(void) {
++    return sBootPrevious;
 +}
 +#endif
 diff --git a/soh/soh/resource/importer/AudioSoundFontFactory.cpp b/soh/soh/resource/importer/AudioSoundFontFactory.cpp
@@ -2985,16 +3109,18 @@ index 4190955a..d027981a 100644
  
  void Graph_OpenDisps(Gfx** dispRefs, GraphicsContext* gfxCtx, const char* file, s32 line) {
 diff --git a/soh/src/code/main.c b/soh/src/code/main.c
-index 4e68d5da..992adb50 100644
+index 4e68d5da..f48cefbf 100644
 --- a/soh/src/code/main.c
 +++ b/soh/src/code/main.c
-@@ -57,22 +57,73 @@ int SDL_main(int argc, char* argv[]) {
+@@ -57,22 +57,79 @@ int SDL_main(int argc, char* argv[]) {
      // Keep '.' as the decimal point, user locale may use ','
      setlocale(LC_NUMERIC, "C");
  
 +#elif defined(__XSDK__)
 +void Oot360_LogMemory(const char* where);
 +void Oot360_StartHeartbeat(void);
++void Oot360_BootGuardStart(void);
++void Oot360_BootGuardClean(const char* why);
 +// Xbox 360: main() below runs this on a thread with a bigger stack than the 1 MB xsdk gives the main thread.
 +int SohMain(int argc, char* argv[]) {
  #else //_WIN32
@@ -3014,6 +3140,9 @@ index 4e68d5da..992adb50 100644
 +    Oot360_LogMemory("after Heaps_Alloc");
 +#endif
      Main(0);
++#ifdef __XSDK__
++    Oot360_BootGuardClean("the game quit normally");
++#endif
      DeinitOTR();
      Heaps_Free();
      return 0;
@@ -3045,6 +3174,7 @@ index 4e68d5da..992adb50 100644
 +    sXboxArgc = argc;
 +    sXboxArgv = argv;
 +    Oot360_LogMemory("main");
++    Oot360_BootGuardStart();
 +    Oot360_StartHeartbeat();
 +    SDL_SetHint("SDL_AUDIO_XSDK_HARDWARE_THREAD", "5");
 +    pthread_attr_init(&attr);
@@ -3305,7 +3435,7 @@ index 3681efd1..5af4312a 100644
          s16 texHeight = 16;
          s16 endTexWidth = 8;
 diff --git a/soh/src/code/z_play.c b/soh/src/code/z_play.c
-index 729edd0e..53d8f704 100644
+index 729edd0e..071ee592 100644
 --- a/soh/src/code/z_play.c
 +++ b/soh/src/code/z_play.c
 @@ -51,6 +51,23 @@ void disableBetaQuest();
@@ -3332,7 +3462,34 @@ index 729edd0e..53d8f704 100644
  void Play_RequestViewpointBgCam(PlayState* play) {
      Camera_ChangeDataIdx(GET_ACTIVE_CAM(play), play->unk_1242B - 1);
  }
-@@ -779,6 +796,18 @@ void Play_Update(PlayState* play) {
+@@ -651,11 +668,26 @@ void Play_Init(GameState* thisx) {
+ #endif
+ }
+ 
++#ifdef __XSDK__
++void Oot360_BootGuardClean(const char* why); // platform/xbox360/MemTrace.c
++#endif
++
+ void Play_Update(PlayState* play) {
+     Input* input = play->state.input;
+     s32 isPaused;
+     s32 pad1;
+ 
++#ifdef __XSDK__
++    {
++        // oot360 test 23: a save file played for a minute (1200 game updates) makes this a clean start for the
++        // start-up guard (MemTrace.c): the title's demo runs with fileNum 0xFF, a file select's choice is 0 to 2.
++        static u32 sPlayedUpdates;
++        if (gSaveContext.fileNum >= 0 && gSaveContext.fileNum <= 2 && ++sPlayedUpdates == 1200) {
++            Oot360_BootGuardClean("a save file played for a minute");
++        }
++    }
++#endif
++
+     if ((SREG(1) < 0) || (DREG(0) != 0)) {
+         SREG(1) = 0;
+         ZeldaArena_Display();
+@@ -779,6 +811,18 @@ void Play_Update(PlayState* play) {
                          if (gSaveContext.cutsceneIndex >= 0xFFF0) {
                              sceneLayer = SCENE_LAYER_CUTSCENE_FIRST + (gSaveContext.cutsceneIndex & 0xF);
                          }
@@ -3351,7 +3508,7 @@ index 729edd0e..53d8f704 100644
  
                          // fade out bgm if "continue bgm" flag is not set
                          if (!(gEntranceTable[play->nextEntranceIndex + sceneLayer].field &
-@@ -1152,6 +1181,7 @@ void Play_Update(PlayState* play) {
+@@ -1152,6 +1196,7 @@ void Play_Update(PlayState* play) {
                      func_800973FC(play, &play->roomCtx);
  
                      PLAY_LOG(3612);
@@ -3359,7 +3516,7 @@ index 729edd0e..53d8f704 100644
                      CollisionCheck_AT(play, &play->colChkCtx);
  
                      PLAY_LOG(3618);
-@@ -1164,10 +1194,12 @@ void Play_Update(PlayState* play) {
+@@ -1164,10 +1209,12 @@ void Play_Update(PlayState* play) {
                      CollisionCheck_ClearContext(play, &play->colChkCtx);
  
                      PLAY_LOG(3637);
@@ -3372,7 +3529,7 @@ index 729edd0e..53d8f704 100644
  
                      PLAY_LOG(3643);
                      func_80064558(play, &play->csCtx);
-@@ -1313,6 +1345,15 @@ void Play_Draw(PlayState* play) {
+@@ -1313,6 +1360,15 @@ void Play_Draw(PlayState* play) {
      static bool hasCapturedPauseBuffer;
      bool recapturePauseBuffer = false;
  
@@ -3388,7 +3545,7 @@ index 729edd0e..53d8f704 100644
      // If the size has changed, alt assets toggled, or dropped frames leading to the buffer not being copied,
      // set the prerender state back to setup to copy a new frame.
      // This requires not rendering kaleido during this copy to avoid kaleido itself being copied too.
-@@ -1324,6 +1365,18 @@ void Play_Draw(PlayState* play) {
+@@ -1324,6 +1380,18 @@ void Play_Draw(PlayState* play) {
      }
      // #endregion
  
@@ -3407,7 +3564,7 @@ index 729edd0e..53d8f704 100644
      OPEN_DISPS(gfxCtx);
  
      gSegments[4] = VIRTUAL_TO_PHYSICAL(play->objectCtx.status[play->objectCtx.mainKeepIndex].segment);
-@@ -1520,7 +1573,9 @@ void Play_Draw(PlayState* play) {
+@@ -1520,7 +1588,9 @@ void Play_Draw(PlayState* play) {
          }
  
          if ((HREG(80) != 10) || (HREG(85) != 0)) {
@@ -3417,7 +3574,7 @@ index 729edd0e..53d8f704 100644
          }
  
          if ((HREG(80) != 10) || (HREG(86) != 0)) {
-@@ -1678,16 +1733,29 @@ void Play_Main(GameState* thisx) {
+@@ -1678,16 +1748,29 @@ void Play_Main(GameState* thisx) {
      }
  
      if ((HREG(80) != 10) || (HREG(81) != 0)) {
