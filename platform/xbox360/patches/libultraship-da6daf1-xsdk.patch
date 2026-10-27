@@ -50,10 +50,10 @@ index 7c16ca1..5ff7e5b 100644
  class Fast3dWindow : public Ship::Window {
 diff --git a/include/fast/backends/gfx_xenos.h b/include/fast/backends/gfx_xenos.h
 new file mode 100644
-index 0000000..35b247f
+index 0000000..3c1e941
 --- /dev/null
 +++ b/include/fast/backends/gfx_xenos.h
-@@ -0,0 +1,391 @@
+@@ -0,0 +1,398 @@
 +#ifdef ENABLE_XENOS
 +#pragma once
 +
@@ -214,11 +214,17 @@ index 0000000..35b247f
 +    uint32_t DisplayHeight() const {
 +        return mHeight;
 +    }
++    // oot360 test 23: no display to present to (Xenia: xsdk_present_open times out on the display's colour table);
++    // the game runs on and frames are paced by the clock, so the rest can still be smoke-tested there.
++    bool IsHeadless() const {
++        return mHeadless;
++    }
 +
 +  private:
 +    uint32_t mWidth = 1280;
 +    uint32_t mHeight = 720;
 +    bool mOpen = false;
++    bool mHeadless = false;
 +    uint32_t mQuitHeldFrames = 0;
 +    int mLoggedPads = -1;
 +    bool mCaptureHeld = false;
@@ -413,6 +419,7 @@ index 0000000..35b247f
 +
 +    // Frame pacing: each frame shows for 60 / the game's fps vblanks (SoH runs at 20 unless interpolating).
 +    void PaceFrame();
++    void PaceFrameHeadless(); // oot360 test 23: no display (Xenia)
 +
 +    // GPU time of a frame (oot360, test 13): every kTimingEvery frames the GPU waits at the frame's start for a word
 +    // the CPU writes once the whole frame is queued, so the clocks around it time the GPU's work alone, not the CPU
@@ -848,10 +855,10 @@ index 2b77a5f..d4dea73 100644
      }
 diff --git a/src/fast/backends/gfx_xenos.cpp b/src/fast/backends/gfx_xenos.cpp
 new file mode 100644
-index 0000000..35cef1c
+index 0000000..987340e
 --- /dev/null
 +++ b/src/fast/backends/gfx_xenos.cpp
-@@ -0,0 +1,2326 @@
+@@ -0,0 +1,2357 @@
 +#ifdef ENABLE_XENOS
 +// Fast3D on the Xbox 360's Xenos GPU through xenosworks' xsdk.
 +//
@@ -1076,11 +1083,17 @@ index 0000000..35cef1c
 +    }
 +    s = xsdk_present_open(XSDK_DISPLAY_720P, 2, 1, &mWidth, &mHeight);
 +    if (!NT_SUCCESS(s)) {
-+        xsdk_log_write("xenos: xsdk_present_open failed: 0x%08X", (unsigned)s);
-+        mIsRunning = false;
-+        return;
++        // oot360 test 23: Xenia never finishes the display's colour table (0xC00000B5); the console always has opened
++        // it. Without a display the game ran into a GUI that was never set up (no Gui::Init, no fonts) and stopped at
++        // start, so nothing past it could be checked in Xenia. Now it goes on headless: no picture, frames paced by
++        // the clock, the log and the frame captures as on the console.
++        xsdk_log_write("xenos: xsdk_present_open failed: 0x%08X; going on without a display (Xenia?)", (unsigned)s);
++        mHeadless = true;
++        mWidth = 1280;
++        mHeight = 720;
++    } else {
++        mOpen = true;
 +    }
-+    mOpen = true;
 +    mFullScreen = true;
 +    xsdk_log_write("xenos: display %ux%u", (unsigned)mWidth, (unsigned)mHeight);
 +
@@ -2820,7 +2833,12 @@ index 0000000..35cef1c
 +    uint32_t address = 0;
 +    // Waits for a front buffer to come off screen: at 60 fps, the vblank.
 +    Oot360_Phase("xenos: present wait");
-+    if (NT_SUCCESS(xsdk_present_begin(&address, kBeginTimeoutMs))) {
++    if (mWindow->IsHeadless()) {
++        // oot360 test 23: no display (Xenia): the frame's GPU work is queued as always, nothing is presented, and the
++        // clock paces the frames
++        Oot360_Phase("xenos: pacing wait");
++        PaceFrameHeadless();
++    } else if (NT_SUCCESS(xsdk_present_begin(&address, kBeginTimeoutMs))) {
 +        Trace("present into 0x%08X", (unsigned)address);
 +        xsdk_gpu_resolve(address, mFramebuffers[0].width, mFramebuffers[0].height, 0xFF000000);
 +        Oot360_Phase("xenos: pacing wait");
@@ -2885,8 +2903,10 @@ index 0000000..35cef1c
 +    }
 +
 +    if ((mFrame % 600) == 0) {
-+        XsdkPresentStats ps;
-+        xsdk_present_stats(&ps);
++        XsdkPresentStats ps = {};
++        if (!mWindow->IsHeadless()) {
++            xsdk_present_stats(&ps);
++        }
 +        const double now = mWindow->GetTime();
 +        const double seconds = mLastLogTime > 0.0 ? now - mLastLogTime : 0.0;
 +        const uint32_t vblanks = ps.vblanks - mLastStats.vblanks;
@@ -3012,6 +3032,24 @@ index 0000000..35cef1c
 +        mLastLogTime = now;
 +        mWaitUs = 0;
 +    }
++}
++
++void GfxRenderingAPIXenos::PaceFrameHeadless() {
++    using clock = std::chrono::steady_clock;
++    static clock::time_point next;
++    const uint32_t fps = std::clamp<uint32_t>(mWindow->GetTargetFps() > 0 ? mWindow->GetTargetFps() : 60, 10, 60);
++    const auto period = std::chrono::microseconds(1000000 / fps);
++    const auto now = clock::now();
++    if (next.time_since_epoch().count() == 0 || now > next + period) {
++        next = now;
++    }
++    next += period;
++    const auto start = clock::now();
++    while (clock::now() < next) {
++        struct timespec ts = { 0, 1000000 };
++        nanosleep(&ts, nullptr);
++    }
++    mWaitUs += (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - start).count();
 +}
 +
 +void GfxRenderingAPIXenos::PaceFrame() {
