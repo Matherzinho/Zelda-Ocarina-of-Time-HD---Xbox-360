@@ -855,7 +855,7 @@ index 2b77a5f..d4dea73 100644
      }
 diff --git a/src/fast/backends/gfx_xenos.cpp b/src/fast/backends/gfx_xenos.cpp
 new file mode 100644
-index 0000000..987340e
+index 0000000..25ca230
 --- /dev/null
 +++ b/src/fast/backends/gfx_xenos.cpp
 @@ -0,0 +1,2357 @@
@@ -1883,7 +1883,7 @@ index 0000000..987340e
 +        levels = 1;
 +    }
 +    if (Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger("gOot360.Mipmaps", 1) == 0 ||
-+        Oot360_SafeLevel() >= 2) {
++        Oot360_SafeLevel() >= 3) {
 +        levels = 1;
 +    }
 +    XenosTexture& t = Texture(mCurrentTextureIds[mCurrentTile]);
@@ -1921,7 +1921,7 @@ index 0000000..987340e
 +    uint32_t levels = 1;
 +    if ((hd || mFilterMode == FILTER_LINEAR) && width >= 64 && height >= 64 &&
 +        Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger("gOot360.Mipmaps", 1) &&
-+        Oot360_SafeLevel() < 2) {
++        Oot360_SafeLevel() < 3) {
 +        while ((std::max(width, height) >> (levels - 1)) > 1) {
 +            levels++;
 +        }
@@ -2188,7 +2188,7 @@ index 0000000..987340e
 +void GfxRenderingAPIXenos::PostProcessGame() {
 +    if (!mFxaaLoaded || mGpuHung || mBoundFb != 0 ||
 +        !Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger("gOot360.Fxaa", 1) ||
-+        Oot360_SafeLevel() >= 2) {
++        Oot360_SafeLevel() >= 3) {
 +        return;
 +    }
 +    RestoreIfNeeded();

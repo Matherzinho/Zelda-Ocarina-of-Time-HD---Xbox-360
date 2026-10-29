@@ -292,6 +292,14 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
   archive, on the user's PC. Measured on the user's 3DS Experience archives: the world textures above 2x (2,375) are
   already at their full 8x-16x in the console pack and the rest are 2x or less in the mod itself, so there is nothing
   sharper to restore for the areas; the DXT pack is about memory.
+- **Test 24:** (built on the user's PC in WSL Ubuntu 24.04, not yet run) test 23 on the console (user, 2026-10-28):
+  safe mode 1 plays but slowly; a normal start runs at 60 fps and closes soon after, e.g. leaving Link's house; the
+  log that came back was the safe-mode start's, as xsdk's start-up empties soh.log. Capture 11693: "Grande Árvore"
+  with the r over the Á (the translation's Á is in the Î slot, 0x81, with an I's width: 12 px advance at 720p) and a
+  gap after the G (27 px advance against 21 for the HD glyph). Now: the last start's log copied to soh-anterior.log
+  before xsdk opens the new one (-Wl,--wrap=xsdk_log_open, MemTrace.c); safe modes one step at a time (1 no loading
+  ahead; 2 also no render thread; 3 also no mods, FXAA, mip levels); with ptbr.o2r, sFontWidths[0x81] takes 'A''s
+  and 'G' is 10.
 
 ## Not done yet / known gaps
 (Done since this list began: the title's 2-cycle effect, logo and text and the controller in tests 6-7; 60 fps at 720p
