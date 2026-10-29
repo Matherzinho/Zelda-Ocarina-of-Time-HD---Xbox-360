@@ -2449,10 +2449,10 @@ index 00000000..60178a3c
 +#endif
 diff --git a/soh/soh/platform/xbox360/MemTrace.c b/soh/soh/platform/xbox360/MemTrace.c
 new file mode 100644
-index 00000000..df6689f0
+index 00000000..84fe7e32
 --- /dev/null
 +++ b/soh/soh/platform/xbox360/MemTrace.c
-@@ -0,0 +1,376 @@
+@@ -0,0 +1,400 @@
 +#ifdef __XSDK__
 +// Memory diagnostics for the Xbox 360 build: the link wraps malloc, calloc, realloc and memalign
 +// (soh/CMakeLists.txt, -Wl,--wrap=...) and this logs every allocation of 2 MB or more, and every failure, with the
@@ -2794,8 +2794,23 @@ index 00000000..df6689f0
 +// runs, and opening it empties it, so a start that closed the game left nothing to read once it was opened again: test
 +// 23's safe mode came back with the log of the start after the crash, not of the crash. The linker sends start.c's call
 +// here (soh/CMakeLists.txt, -Wl,--wrap=xsdk_log_open), which copies the log to soh-anterior.log first, where it opens
-+// (game:\, else cache:\ as in Xenia). Nothing is logged meanwhile: the log isn't open yet.
++// (game:\, else cache:\ as in Xenia). Kernel calls only, as log.c's own: this runs before the log's lock exists, and
++// the C library's open() logs its failures (file.c), which took the lock uninitialised and left test 24's first build
++// on a black screen. Nothing is logged here.
 +NTSTATUS __real_xsdk_log_open(void);
++
++static NTSTATUS KeepLastLogOpen(HANDLE* handle, const char* path, int write) {
++    const ANSI_STRING name = {
++        .length = (uint16_t)strlen(path),
++        .maximum_length = (uint16_t)(strlen(path) + 1),
++        .pointer = path,
++    };
++    const OBJECT_ATTRIBUTES attributes = { .root_directory = OB_DOS_DEVICES, .name = &name };
++    IO_STATUS_BLOCK io_status;
++    return NtCreateFile(handle, (write ? GENERIC_WRITE : GENERIC_READ) | SYNCHRONIZE, &attributes, &io_status, NULL,
++                        FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, write ? FILE_OVERWRITE_IF : FILE_OPEN,
++                        FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE);
++}
 +
 +static void KeepLastLog(void) {
 +    static const char* const kPairs[][2] = {
@@ -2804,18 +2819,27 @@ index 00000000..df6689f0
 +    };
 +    static char buffer[64 << 10];
 +    for (int i = 0; i < 2; i++) {
-+        FILE* in = fopen(kPairs[i][0], "rb");
-+        if (!in) {
++        HANDLE in;
++        if (!NT_SUCCESS(KeepLastLogOpen(&in, kPairs[i][0], 0))) {
 +            continue;
 +        }
-+        FILE* out = fopen(kPairs[i][1], "wb");
-+        if (out) {
-+            size_t n;
-+            while ((n = fread(buffer, 1, sizeof buffer, in)) > 0 && fwrite(buffer, 1, n, out) == n) {
++        HANDLE out;
++        if (NT_SUCCESS(KeepLastLogOpen(&out, kPairs[i][1], 1))) {
++            // at most 64 MB, so a runaway log can't hold the start up
++            for (int chunk = 0; chunk < 1024; chunk++) {
++                IO_STATUS_BLOCK io_status;
++                if (!NT_SUCCESS(NtReadFile(in, 0, NULL, NULL, &io_status, buffer, sizeof buffer, NULL)) ||
++                    io_status.information == 0) {
++                    break;
++                }
++                const uint32_t n = io_status.information;
++                if (!NT_SUCCESS(NtWriteFile(out, 0, NULL, NULL, &io_status, buffer, n, NULL))) {
++                    break;
++                }
 +            }
-+            fclose(out);
++            NtClose(out);
 +        }
-+        fclose(in);
++        NtClose(in);
 +        return;
 +    }
 +}
