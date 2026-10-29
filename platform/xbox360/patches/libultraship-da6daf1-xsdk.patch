@@ -7097,7 +7097,7 @@ index 59b7082..026f90f 100644
  
  std::shared_ptr<ResourceInitData> IResource::GetInitData() {
 diff --git a/src/ship/resource/ResourceLoader.cpp b/src/ship/resource/ResourceLoader.cpp
-index e9adf34..64711ba 100644
+index e9adf34..c6926c6 100644
 --- a/src/ship/resource/ResourceLoader.cpp
 +++ b/src/ship/resource/ResourceLoader.cpp
 @@ -98,6 +98,11 @@ std::shared_ptr<ResourceInitData> ResourceLoader::ReadResourceInitDataLegacy(con
@@ -7112,7 +7112,25 @@ index e9adf34..64711ba 100644
          return ReadResourceInitDataXml(filePath, xmlReader);
      } else {
          if (fileToLoad->Buffer->size() < OTR_HEADER_SIZE) {
-@@ -259,6 +264,12 @@ std::shared_ptr<IResource> ResourceLoader::LoadResource(std::string filePath, st
+@@ -250,6 +255,17 @@ std::shared_ptr<IResource> ResourceLoader::LoadResource(std::string filePath, st
+         SPDLOG_ERROR("Failed to load file at path {}.", filePath);
+         return nullptr;
+     }
++#ifdef __XSDK__
++    // oot360 test 24c: a file whose header or XML can't be read (ReadResourceInitDataLegacy logs it and gives nothing)
++    // was read through a null pointer just below. Ship of Harkinian on a PC never asks for the 3DS Experience's three
++    // broken material files in spot04_scene (Kokiri Forest), but loading ahead reads every file of a scene's
++    // directory, and the Xbox 360 closed each time the forest loaded after Link's house (tests 22-24, the
++    // "Failed to parse XML file ... f3dlite_material_77x" lines right before every crash).
++    if (initData == nullptr) {
++        SPDLOG_ERROR("LoadResource: no resource header for {}; left out", filePath);
++        return nullptr;
++    }
++#endif
+ 
+     switch (initData->Format) {
+         case RESOURCE_FORMAT_BINARY:
+@@ -259,6 +275,12 @@ std::shared_ptr<IResource> ResourceLoader::LoadResource(std::string filePath, st
              fileToLoad->Reader = CreateBinaryReader(fileToLoad, initData);
              break;
          case RESOURCE_FORMAT_XML:
