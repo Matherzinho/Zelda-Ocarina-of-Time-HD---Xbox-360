@@ -300,6 +300,19 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
   before xsdk opens the new one (-Wl,--wrap=xsdk_log_open, MemTrace.c); safe modes one step at a time (1 no loading
   ahead; 2 also no render thread; 3 also no mods, FXAA, mip levels); with ptbr.o2r, sFontWidths[0x81] takes 'A''s
   and 'G' is 10.
+- **Test 24c:** (built, run on the console by the user, 2026-10-30) a resource whose header can't be read is left out;
+  no closes in that session.
+- **Test 25:** (built on the user's PC in WSL Ubuntu 24.04, not yet run) from test 24c's log, video and captures. A square
+  of noise as the first letter when a text changed: Message_FindMessage kept the type in charTexBuf[0], slot 0's
+  "__OTR__" path (gOot360TextBoxTypePos now). Place names leaning: h_byte_scale 15.999999 in C1 PT-BR Interface 4x, 144 *
+  scale truncated to 2303 bytes a row, 575 texels of 576 (scales rounded, near-whole ones snapped on load). Kokiri
+  Forest's vine through a wall (captures 8181-8234, depth 0, no alpha): G_RM_ZB_CLD_SURF2 wasn't in
+  DisplayListFactory's G_SETOTHERMODE_L list, which now takes every name in its renderModes table. VMX turned off in a
+  run, colour 0 against 0x50 in r, g and b: a light with no direction made NaN coefficients and vec_max keeps NaN (vertex
+  calls 7 us before, 24 us after); now a compare's mask as the scalar "intensity > 0", and a colour-only difference is
+  logged without turning VMX off. The text box's 512x256 HD texture imported every frame a text was up (2.5 ms a
+  frame): invalidated only when its path changes. Message_OpenText and Message_Decode wait for the render thread before
+  rewriting the paths it reads. Expected Kokiri Forest about 18-20 ms a frame from 27 (estimate, not measured).
 
 ## Not done yet / known gaps
 (Done since this list began: the title's 2-cycle effect, logo and text and the controller in tests 6-7; 60 fps at 720p

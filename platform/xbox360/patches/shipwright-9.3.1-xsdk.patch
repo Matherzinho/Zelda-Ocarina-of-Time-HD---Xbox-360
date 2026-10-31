@@ -218,6 +218,26 @@ index 25b464b2..cf56b804 100644
  
          if (ImGui::CollapsingHeader("Modifier Buttons")) {
              DrawButtonLine("M1", portIndex, BTN_CUSTOM_MODIFIER1);
+diff --git a/soh/soh/Enhancements/custom-message/CustomMessageManager.cpp b/soh/soh/Enhancements/custom-message/CustomMessageManager.cpp
+index bddadf53..3f62c58c 100644
+--- a/soh/soh/Enhancements/custom-message/CustomMessageManager.cpp
++++ b/soh/soh/Enhancements/custom-message/CustomMessageManager.cpp
+@@ -262,12 +262,14 @@ bool CustomMessage::operator!=(const CustomMessage& operand) const {
+     return !operator==(operand);
+ }
+ 
++extern "C" u8 gOot360TextBoxTypePos; // z_message_PAL.c
++
+ void CustomMessage::LoadIntoFont() {
+     MessageContext* msgCtx = &gPlayState->msgCtx;
+     Font* font = &msgCtx->font;
+     char* buffer = font->msgBuf;
+     const size_t maxBufferSize = sizeof(font->msgBuf);
+-    font->charTexBuf[0] = (type << 4) | position;
++    gOot360TextBoxTypePos = (type << 4) | position;
+     switch (gSaveContext.language) {
+         case LANGUAGE_FRA:
+             msgCtx->msgLength = font->msgLength =
 diff --git a/soh/soh/Enhancements/kaleido.cpp b/soh/soh/Enhancements/kaleido.cpp
 index ee66375f..1f15a179 100644
 --- a/soh/soh/Enhancements/kaleido.cpp
@@ -3430,10 +3450,71 @@ index b685fa0a..11edc9c3 100644
              }
          }
 diff --git a/soh/src/code/z_message_PAL.c b/soh/src/code/z_message_PAL.c
-index 66a7baae..83fd2f5f 100644
+index 66a7baae..83499f07 100644
 --- a/soh/src/code/z_message_PAL.c
 +++ b/soh/src/code/z_message_PAL.c
-@@ -1587,7 +1587,21 @@ void Message_DrawText(PlayState* play, Gfx** gfxP) {
+@@ -298,6 +298,15 @@ void Message_GrowTextbox(MessageContext* msgCtx) {
+     R_TEXTBOX_X = (R_TEXTBOX_X_TARGET + R_TEXTBOX_WIDTH_TARGET) - (R_TEXTBOX_WIDTH / 2);
+ }
+ 
++// oot360 test 25: the message's type and position, which the game kept in charTexBuf[0]. Slot 0 holds the first letter's
++// resource path ("__OTR__...", Font_LoadChar), so from the next message's lookup until its text was decoded the first
++// letter lost its signature and its path was drawn as an I4 texture: a square of noise as a shop's text changed.
++u8 gOot360TextBoxTypePos = 0;
++
++// oot360 test 25: the letters' and text box's paths are read as the render thread draws the frame before; they aren't
++// rewritten under it (OTRGlobals.cpp).
++void Oot360_RenderWait(void);
++
+ // Taken from decomped N64 1.0 z_message https://decomp.me/scratch/462bn
+ void Message_FindMessageJPN(PlayState* play, u16 textId) {
+     const char* foundSeg;
+@@ -311,7 +320,7 @@ void Message_FindMessageJPN(PlayState* play, u16 textId) {
+     while (messageTableEntry->textId != 0xFFFF) {
+         if (messageTableEntry->textId == textId) {
+             foundSeg = messageTableEntry->segment;
+-            font->charTexBuf[0] = messageTableEntry->typePos;
++            gOot360TextBoxTypePos = messageTableEntry->typePos;
+             nextSeg = messageTableEntry->segment;
+             font->msgOffset = messageTableEntry->segment;
+             font->msgLength = messageTableEntry->msgSize;
+@@ -329,7 +338,7 @@ void Message_FindMessageJPN(PlayState* play, u16 textId) {
+     messageTableEntry = sJpnMessageEntryTablePtr;
+ 
+     foundSeg = messageTableEntry->segment;
+-    font->charTexBuf[0] = messageTableEntry->typePos;
++    gOot360TextBoxTypePos = messageTableEntry->typePos;
+     messageTableEntry++;
+     nextSeg = messageTableEntry->segment;
+ 
+@@ -361,7 +370,7 @@ void Message_FindMessage(PlayState* play, u16 textId) {
+ 
+         if (messageTableEntry->textId == textId) {
+             foundSeg = messageTableEntry->segment;
+-            font->charTexBuf[0] = messageTableEntry->typePos;
++            gOot360TextBoxTypePos = messageTableEntry->typePos;
+ 
+             nextSeg = messageTableEntry->segment;
+             font->msgOffset = messageTableEntry->segment;
+@@ -382,7 +391,7 @@ void Message_FindMessage(PlayState* play, u16 textId) {
+     messageTableEntry = sNesMessageEntryTablePtr;
+ 
+     foundSeg = messageTableEntry->segment;
+-    font->charTexBuf[0] = messageTableEntry->typePos;
++    gOot360TextBoxTypePos = messageTableEntry->typePos;
+     messageTableEntry++;
+     nextSeg = messageTableEntry->segment;
+     font->msgOffset = foundSeg - seg;
+@@ -402,7 +411,7 @@ void Message_FindCreditsMessage(PlayState* play, u16 textId) {
+ 
+         if (messageTableEntry->textId == textId) {
+             foundSeg = messageTableEntry->segment;
+-            font->charTexBuf[0] = messageTableEntry->typePos;
++            gOot360TextBoxTypePos = messageTableEntry->typePos;
+             nextSeg = messageTableEntry->segment;
+             font->msgOffset = messageTableEntry->segment;
+             font->msgLength = messageTableEntry->msgSize;
+@@ -1587,7 +1596,21 @@ void Message_DrawText(PlayState* play, Gfx** gfxP) {
                      Audio_PlaySfxGeneral(0, &gSfxDefaultPos, 4, &gSfxDefaultFreqAndVolScale,
                                           &gSfxDefaultFreqAndVolScale, &gSfxDefaultReverb);
                  }
@@ -3456,7 +3537,32 @@ index 66a7baae..83fd2f5f 100644
                  charTexIdx += FONT_CHAR_TEX_SIZE;
  
                  msgCtx->textPosX += (s32)(sFontWidths[character - ' '] * (R_TEXT_CHAR_SCALE / 100.0f));
-@@ -2866,6 +2880,16 @@ void Message_StartTextbox(PlayState* play, u16 textId, Actor* actor) {
+@@ -2237,6 +2260,7 @@ void Message_DecodeJPN(PlayState* play) {
+ }
+ 
+ void Message_Decode(PlayState* play) {
++    Oot360_RenderWait();
+     u8 temp_s2;
+     u8 phi_s1;
+     u16 phi_s0_3;
+@@ -2681,6 +2705,7 @@ void Message_Decode(PlayState* play) {
+ extern const char* msgStaticTbl[];
+ 
+ void Message_OpenText(PlayState* play, u16 textId) {
++    Oot360_RenderWait();
+     lusprintf(__FILE__, __LINE__, 2, "Display Text - textId: %#x", textId);
+     static s16 messageStaticIndices[] = { 0, 1, 3, 2 };
+     MessageContext* msgCtx = &play->msgCtx;
+@@ -2812,7 +2837,7 @@ void Message_OpenText(PlayState* play, u16 textId) {
+         memcpy(font->msgBuf, src, font->msgLength);
+     }
+ 
+-    msgCtx->textBoxProperties = font->charTexBuf[0];
++    msgCtx->textBoxProperties = gOot360TextBoxTypePos;
+     msgCtx->textBoxType = msgCtx->textBoxProperties >> 4;
+     msgCtx->textBoxPos = msgCtx->textBoxProperties & 0xF;
+     textBoxType = msgCtx->textBoxType;
+@@ -2866,6 +2891,16 @@ void Message_StartTextbox(PlayState* play, u16 textId, Actor* actor) {
      msgCtx->stateTimer = 0;
      msgCtx->textDelayTimer = 0;
      play->msgCtx.ocarinaMode = OCARINA_MODE_00;
@@ -3473,6 +3579,24 @@ index 66a7baae..83fd2f5f 100644
  }
  
  void Message_ContinueTextbox(PlayState* play, u16 textId) {
+@@ -3079,7 +3114,16 @@ void Message_DrawTextBox(PlayState* play, Gfx** p) {
+     MessageContext* msgCtx = &play->msgCtx;
+     Gfx* gfx = *p;
+ 
+-    gSPInvalidateTexCache(gfx++, msgCtx->textboxSegment);
++    // oot360 test 25: only when the box's picture changes (Message_OpenText). Every frame, the HD packs' 512x256 box was
++    // decoded, uploaded and given its mip levels again as long as a text was up: 2.5 ms of each frame (test 24c's log).
++    {
++        static char sDrawnTextbox[128];
++
++        if (strncmp(sDrawnTextbox, (const char*)msgCtx->textboxSegment, sizeof(sDrawnTextbox) - 1) != 0) {
++            strncpy(sDrawnTextbox, (const char*)msgCtx->textboxSegment, sizeof(sDrawnTextbox) - 1);
++            gSPInvalidateTexCache(gfx++, msgCtx->textboxSegment);
++        }
++    }
+     gDPPipeSync(gfx++);
+     gDPSetPrimColor(gfx++, 0, 0, msgCtx->textboxColorRed, msgCtx->textboxColorGreen, msgCtx->textboxColorBlue,
+                     msgCtx->textboxColorAlphaCurrent);
 diff --git a/soh/src/code/z_parameter.c b/soh/src/code/z_parameter.c
 index 3681efd1..5af4312a 100644
 --- a/soh/src/code/z_parameter.c
