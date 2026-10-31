@@ -301,7 +301,7 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
   ahead; 2 also no render thread; 3 also no mods, FXAA, mip levels); with ptbr.o2r, sFontWidths[0x81] takes 'A''s
   and 'G' is 10.
 - **Test 24c:** (built, run on the console by the user, 2026-10-30) a resource whose header can't be read is left out;
-  no closes in that session.
+  the user reported no closes; both logs just stop, so the logs alone do not show how those runs ended.
 - **Test 25:** (built on the user's PC in WSL Ubuntu 24.04, not yet run) from test 24c's log, video and captures. A square
   of noise as the first letter when a text changed: Message_FindMessage kept the type in charTexBuf[0], slot 0's
   "__OTR__" path (gOot360TextBoxTypePos now). Place names leaning: h_byte_scale 15.999999 in C1 PT-BR Interface 4x, 144 *
