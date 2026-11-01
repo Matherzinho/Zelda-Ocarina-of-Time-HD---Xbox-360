@@ -13,7 +13,8 @@ test's results).
 - A PC with **Ship of Harkinian 9.3.1** (the exact version the port is built from): the release from
   https://github.com/HarbourMasters/Shipwright/releases/tag/9.3.1
 
-Nothing from the game is in this project or in its builds. You make the game data yourself, from your ROM.
+This repository has no game data. A build holds the compiled game code from the decompilation, as Ship of Harkinian's own
+builds do. You make the game's data yourself, from your ROM.
 
 ## Making the game data (on the PC)
 
