@@ -8,7 +8,7 @@ para o Xenos e o [xsdk](https://github.com/xenosworks).
 unsigned code (RGH/JTAG) and your own ROM. English details are in [docs/PLAYING.md](docs/PLAYING.md) and
 [docs/STATUS.md](docs/STATUS.md).*
 
-> **Estado: em desenvolvimento, sem versão lançada.** O teste 25 é o candidato à 1.0 e ainda não rodou no console.
+> **Estado: em desenvolvimento, sem versão lançada.** O teste 26 é o candidato à 1.0: é o teste 25, que está rodando bem no console mas ainda sem log analisado, com os créditos, testados só no Xenia.
 
 ## O que este repositório tem
 
@@ -56,7 +56,7 @@ git config core.hooksPath tools/hooks
 A licença do código próprio deste projeto **ainda não foi definida**. O código do jogo, por vir de decompilação, não é
 coberto por nenhuma licença deste repositório, e o Ship of Harkinian não publica um arquivo de licença.
 
-Créditos: HarbourMasters (Ship of Harkinian e libultraship), equipe da decompilação zeldaret/oot, xenosworks (xsdk).
+Port para Xbox 360 por **Matherzin**. Créditos da base: HarbourMasters (Ship of Harkinian e libultraship), equipe da decompilação zeldaret/oot, xenosworks (xsdk).
 As licenças das outras dependências estão listadas em [docs/STATUS.md](docs/STATUS.md).
 
 Projeto de fãs, sem vínculo com a Nintendo ou a Microsoft. The Legend of Zelda é marca da Nintendo.

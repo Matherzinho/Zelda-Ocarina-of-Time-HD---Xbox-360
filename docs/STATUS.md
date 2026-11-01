@@ -313,8 +313,15 @@ The user's own xsdk build from the zelda3 work (WSL Debian 13.5): GCC 15.3.0 `po
   logged without turning VMX off. The text box's 512x256 HD texture imported every frame a text was up (2.5 ms a
   frame): invalidated only when its path changes. Message_OpenText and Message_Decode wait for the render thread before
   rewriting the paths it reads. Expected Kokiri Forest about 18-20 ms a frame from 27 (estimate, not measured).
+- **Test 26:** (built on the user's PC in WSL Ubuntu 24.04; in Xenia only) test 25 plus the author's credit: "PORT XBOX 360
+  POR MATHERZIN" under the title's copyright line (EnMag_DrawPortCredit, in the title's font) and a line in Settings >
+  General > About. oot360_auto_capture.txt beside the XEX captures every 600 frames, for tests without hands. Xenia needs
+  --allow_game_relative_writes=true: without it game: is read-only and the title crashes when spdlog can't open its log
+  (Access Violation just after "Log initialization failed"). The credit was seen in captures, without HD packs; the menu
+  line was not seen. The user reported test 25 running well on the console (2026-11-01); its log hasn't come back.
 
 ## Not done yet / known gaps
+- A folder that can't be written ends the title at start, as above: seen in Xenia only.
 (Done since this list began: the title's 2-cycle effect, logo and text and the controller in tests 6-7; 60 fps at 720p
 in test 12; the console's menu defaults in test 22.)
 - Depth readback (`GetPixelDepth` answers "far": lens flare occlusion is off); MSAA; texture 1's mask/blend.

@@ -855,10 +855,10 @@ index 2b77a5f..d4dea73 100644
      }
 diff --git a/src/fast/backends/gfx_xenos.cpp b/src/fast/backends/gfx_xenos.cpp
 new file mode 100644
-index 0000000..25ca230
+index 0000000..9ea89a5
 --- /dev/null
 +++ b/src/fast/backends/gfx_xenos.cpp
-@@ -0,0 +1,2357 @@
+@@ -0,0 +1,2368 @@
 +#ifdef ENABLE_XENOS
 +// Fast3D on the Xbox 360's Xenos GPU through xenosworks' xsdk.
 +//
@@ -2742,6 +2742,17 @@ index 0000000..25ca230
 +    }
 +    // zeldaMM: no frames capture themselves (oot360 took frames 1500 and 3000, its title screen: here they fell in the
 +    // intro, a 200-300 ms hitch each, test 1d); the player asks for one (L3+R3).
++    // A test without hands: with this file beside the XEX, a capture every 600 frames.
++    static const bool sAutoCapture = [] {
++        FILE* f = fopen("game:\\oot360_auto_capture.txt", "r");
++        if (f != nullptr) {
++            fclose(f);
++        }
++        return f != nullptr;
++    }();
++    if (sAutoCapture && mFrame != 0 && mFrame % 600 == 0) {
++        gXenosCaptureRequest = true;
++    }
 +    if (gXenosCaptureRequest.exchange(false) && !mCapture && !mGpuHung) {
 +        char path[96];
 +        snprintf(path, sizeof path, "game:\\oot360_capture_%llu.bin", (unsigned long long)mFrame);

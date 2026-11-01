@@ -2187,7 +2187,7 @@ index de178da7..3ad696aa 100644
  
  } // namespace SohGui
 diff --git a/soh/soh/SohGui/SohMenuSettings.cpp b/soh/soh/SohGui/SohMenuSettings.cpp
-index 476f99f3..7fafb3d0 100644
+index 476f99f3..273d3eec 100644
 --- a/soh/soh/SohGui/SohMenuSettings.cpp
 +++ b/soh/soh/SohGui/SohMenuSettings.cpp
 @@ -14,6 +14,10 @@ extern "C" {
@@ -2265,11 +2265,13 @@ index 476f99f3..7fafb3d0 100644
      AddWidget(path, "Accessibility", WIDGET_SEPARATOR_TEXT);
  #if defined(_WIN32) || defined(__APPLE__) || defined(ESPEAK)
      AddWidget(path, "Text to Speech", WIDGET_CVAR_CHECKBOX)
-@@ -283,6 +311,80 @@ void SohMenu::AddMenuSettings() {
+@@ -283,6 +311,82 @@ void SohMenu::AddMenuSettings() {
          AddWidget(path, GetGameVersionString(i), WIDGET_TEXT);
      }
  
 +#ifdef __XSDK__
++    AddWidget(path, "Port para Xbox 360 por Matherzin", WIDGET_TEXT);
++
 +    // oot360: the console's own settings, in one place (they were spread over General and Graphics, or only in the
 +    // config file)
 +    path.sidebarName = "Xbox 360";
@@ -2346,7 +2348,7 @@ index 476f99f3..7fafb3d0 100644
      // Audio Settings
      path.sidebarName = "Audio";
      path.column = SECTION_COLUMN_1;
-@@ -323,10 +425,16 @@ void SohMenu::AddMenuSettings() {
+@@ -323,10 +427,16 @@ void SohMenu::AddMenuSettings() {
          .Callback([](WidgetInfo& info) {
              Audio_SetGameVolume(SEQ_PLAYER_SFX, ((float)CVarGetInteger(CVAR_SETTING("Volume.SFX"), 100) / 100.0f));
          });
@@ -2363,7 +2365,7 @@ index 476f99f3..7fafb3d0 100644
      const char* tooltip =
          "Uses Matrix Interpolation to create extra frames, resulting in smoother graphics. This is "
          "purely visual and does not impact game logic, execution of glitches, etc.\n\nA higher target "
-@@ -334,10 +442,12 @@ void SohMenu::AddMenuSettings() {
+@@ -334,10 +444,12 @@ void SohMenu::AddMenuSettings() {
      path.sidebarName = "Graphics";
      AddSidebarEntry("Settings", "Graphics", 3);
      AddWidget(path, "Graphics Options", WIDGET_SEPARATOR_TEXT);
@@ -2376,7 +2378,7 @@ index 476f99f3..7fafb3d0 100644
      AddWidget(path, "Internal Resolution", WIDGET_CVAR_SLIDER_FLOAT)
          .CVar(CVAR_INTERNAL_RESOLUTION)
          .RaceDisable(false)
-@@ -361,8 +471,13 @@ void SohMenu::AddMenuSettings() {
+@@ -361,8 +473,13 @@ void SohMenu::AddMenuSettings() {
                  .ShowButtons(false)
                  .IsPercentage()
                  .Min(0.5f)
@@ -2391,7 +2393,7 @@ index 476f99f3..7fafb3d0 100644
      AddWidget(path, "Anti-aliasing (MSAA)", WIDGET_CVAR_SLIDER_INT)
          .CVar(CVAR_MSAA_VALUE)
          .RaceDisable(false)
-@@ -401,6 +516,7 @@ void SohMenu::AddMenuSettings() {
+@@ -401,6 +518,7 @@ void SohMenu::AddMenuSettings() {
          .CVar(CVAR_SETTING("MatchRefreshRate"))
          .RaceDisable(false)
          .Options(CheckboxOptions().Tooltip("Matches interpolation value to the refresh rate of your display."));
@@ -2399,7 +2401,7 @@ index 476f99f3..7fafb3d0 100644
      AddWidget(path, "Renderer API (Needs reload)", WIDGET_VIDEO_BACKEND).RaceDisable(false);
      AddWidget(path, "Enable Vsync", WIDGET_CVAR_CHECKBOX)
          .CVar(CVAR_VSYNC_ENABLED)
-@@ -424,10 +540,25 @@ void SohMenu::AddMenuSettings() {
+@@ -424,10 +542,25 @@ void SohMenu::AddMenuSettings() {
          .Options(CheckboxOptions()
                       .Tooltip("Allows multiple windows to be opened at once. Requires a reload to take effect.")
                       .DefaultValue(true));
@@ -3872,3 +3874,63 @@ index 74e68bfa..579014c7 100644
      if (skyboxCtx->skyboxId != SKYBOX_NONE) {
          osSyncPrintf(VT_FGCOL(GREEN));
  
+diff --git a/soh/src/overlays/actors/ovl_En_Mag/z_en_mag.c b/soh/src/overlays/actors/ovl_En_Mag/z_en_mag.c
+index 00111c91..480aa58c 100644
+--- a/soh/src/overlays/actors/ovl_En_Mag/z_en_mag.c
++++ b/soh/src/overlays/actors/ovl_En_Mag/z_en_mag.c
+@@ -481,6 +481,45 @@ bool EnMag_ShouldDrawPressStart(Font* font, Gfx** gfxP, bool isActualText) {
+ }
+ // #endregion
+ 
++#ifdef __XSDK__
++// oot360: the port's credit under the copyright line, in the title's own font: a shadow, then the letters.
++static void EnMag_DrawPortCredit(Font* font, Gfx** gfxP, s16 alpha) {
++    static const char sCredit[] = "PORT XBOX 360 POR MATHERZIN";
++    const s32 size = 10;
++    const s32 advance = 7;
++    const s32 fontOffset = (sFontType == FONT_TYPE_NTSC) ? 0xA1 : 0;
++    const s32 scale = (16 << 10) / size;
++    Gfx* gfx = *gfxP;
++
++    gDPPipeSync(gfx++);
++    gDPSetCombineLERP(gfx++, 0, 0, 0, PRIMITIVE, TEXEL0, 0, PRIMITIVE, 0, 0, 0, 0, PRIMITIVE, TEXEL0, 0, PRIMITIVE, 0);
++    for (s32 pass = 0; pass < 2; pass++) {
++        // The I is the one narrow letter here: 3 less, so MATHERZIN has no gap.
++        s32 rectLeft = (320 - (((s32)sizeof(sCredit) - 1) * advance - 3)) / 2 + (pass == 0 ? 1 : 0);
++        const s32 rectTop = 216 + (pass == 0 ? 1 : 0);
++
++        gDPPipeSync(gfx++);
++        if (pass == 0) {
++            gDPSetPrimColor(gfx++, 0, 0, 0, 0, 0, alpha);
++        } else {
++            gDPSetPrimColor(gfx++, 0, 0, 255, 230, 140, alpha);
++        }
++        for (const char* c = sCredit; *c != '\0'; rectLeft += (*c == 'I') ? advance - 3 : advance, c++) {
++            if (*c == ' ') {
++                continue;
++            }
++            const s32 index = (*c >= '0' && *c <= '9') ? (*c - '0') : (*c - 'A' + 10);
++            gDPLoadTextureBlock_4b(gfx++, font->fontBuf + (index + fontOffset) * FONT_CHAR_TEX_SIZE, G_IM_FMT_I, 16, 16, 0,
++                                   G_TX_NOMIRROR | G_TX_CLAMP, G_TX_NOMIRROR | G_TX_CLAMP, G_TX_NOMASK, G_TX_NOMASK,
++                                   G_TX_NOLOD, G_TX_NOLOD);
++            gSPTextureRectangle(gfx++, rectLeft << 2, rectTop << 2, (rectLeft + size) << 2, (rectTop + size) << 2,
++                                G_TX_RENDERTILE, 0, 0, scale, scale);
++        }
++    }
++    *gfxP = gfx;
++}
++#endif
++
+ // Title logo is shifted to the left in Master Quest
+ #define LOGO_X_SHIFT (isMQ ? -8 : 0)
+ #define TITLE_X_SHIFT (isMQ ? -32 : 0)
+@@ -658,6 +697,9 @@ void EnMag_DrawInner(Actor* thisx, PlayState* play, Gfx** gfxP) {
+ 
+         gSPTextureRectangle(gfx++, COPYRIGHT_TEX_LEFT << 2, 198 << 2, (COPYRIGHT_TEX_LEFT + COPYRIGHT_TEX_WIDTH) << 2,
+                             (198 + 16) << 2, G_TX_RENDERTILE, 0, 0, 1 << 10, 1 << 10);
++#ifdef __XSDK__
++        EnMag_DrawPortCredit(font, &gfx, (s16)this->copyrightAlpha);
++#endif
+     }
+ 
+     if (gSaveContext.fileNum == 0xFEDC) {
